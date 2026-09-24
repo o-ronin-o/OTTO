@@ -1,0 +1,56 @@
+signals:
+  engine_rpm:
+    unit: rpm
+    range: [0, 8000]
+    resolution: 0.25
+    description: "Engine rotational speed"
+    system: powertrain
+
+  throttle_position:
+    unit: percent
+    range: [0, 100]
+    resolution: 1
+    description: "Accelerator pedal position"
+    system: powertrain
+
+  coolant_temperature:
+    unit: celsius
+    range: [-40, 150]
+    resolution: 1
+    description: "Engine coolant temperature"
+    system: powertrain
+
+  brake_pressure:
+    unit: bar
+    range: [0, 200]
+    resolution: 0.01
+    description: "Hydraulic brake pressure"
+    system: braking
+
+  brake_pedal:
+    unit: percent
+    range: [0, 100]
+    resolution: 1
+    description: "Brake pedal position"
+    system: braking
+
+  wheel_speed:
+    unit: km/h
+    range: [0, 250]
+    resolution: 0.01
+    description: "Wheel rotational speed"
+    system: braking
+
+  vehicle_speed:
+    unit: km/h
+    range: [0, 250]
+    resolution: 0.01
+    description: "Vehicle longitudinal speed"
+    system: dynamics
+
+  longitudinal_acceleration:
+    unit: m/s^2
+    range: [-10, 5]
+    resolution: 0.01
+    description: "Vehicle longitudinal acceleration"
+    system: dynamics

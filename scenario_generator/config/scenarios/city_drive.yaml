@@ -1,0 +1,27 @@
+scenario:
+  name: "City Drive"
+  duration_s: 60
+  base_rate_hz: 100
+  vehicle_id: sedan_a
+  segments:
+    # Idle
+    - {t_start: 0,  t_end: 3,  throttle_pct: 0,  brake_pedal_pct: 0,  gear: 1}
+    # Launch in 1st
+    - {t_start: 3,  t_end: 8,  throttle_pct: 45, brake_pedal_pct: 0,  gear: 1}
+    # Shift to 2nd
+    - {t_start: 8,  t_end: 15, throttle_pct: 35, brake_pedal_pct: 0,  gear: 2}
+    # Brake in 2nd (no downshift yet — speed still high)
+    - {t_start: 15, t_end: 22, throttle_pct: 0,  brake_pedal_pct: 35, gear: 2}
+    # Now at low speed — downshift to 1st for final stop
+    - {t_start: 22, t_end: 25, throttle_pct: 0,  brake_pedal_pct: 45, gear: 1}
+    # Idle
+    - {t_start: 25, t_end: 30, throttle_pct: 0,  brake_pedal_pct: 0,  gear: 1}
+    # Second launch
+    - {t_start: 30, t_end: 35, throttle_pct: 40, brake_pedal_pct: 0,  gear: 1}
+    - {t_start: 35, t_end: 42, throttle_pct: 30, brake_pedal_pct: 0,  gear: 2}
+    # Brake in 2nd
+    - {t_start: 42, t_end: 48, throttle_pct: 0,  brake_pedal_pct: 30, gear: 2}
+    # Downshift at low speed
+    - {t_start: 48, t_end: 52, throttle_pct: 0,  brake_pedal_pct: 40, gear: 1}
+    # Stop
+    - {t_start: 52, t_end: 60, throttle_pct: 0,  brake_pedal_pct: 0,  gear: 1}

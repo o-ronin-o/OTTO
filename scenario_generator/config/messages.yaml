@@ -1,0 +1,54 @@
+message_sets:
+  sedan_class:
+    engine_data:
+      id: 0x100
+      cycle_ms: 10
+      dlc: 8
+      signals:
+        - engine_rpm
+        - throttle_position
+        - coolant_temperature
+
+    brake_data:
+      id: 0x1A0
+      cycle_ms: 20
+      dlc: 8
+      signals:
+        - brake_pressure
+        - brake_pedal
+        - wheel_speed
+
+    vehicle_dynamics:
+      id: 0x120
+      cycle_ms: 50
+      dlc: 8
+      signals:
+        - vehicle_speed
+        - longitudinal_acceleration
+
+  suv_class:
+    engine_data:
+      id: 0x200
+      cycle_ms: 10
+      dlc: 8
+      signals:
+        - engine_rpm
+        - throttle_position
+        - coolant_temperature
+
+    brake_data:
+      id: 0x2B0
+      cycle_ms: 20
+      dlc: 8
+      signals:
+        - brake_pressure
+        - brake_pedal
+        - wheel_speed
+
+    vehicle_dynamics:
+      id: 0x220
+      cycle_ms: 50
+      dlc: 8
+      signals:
+        - vehicle_speed
+        - longitudinal_acceleration

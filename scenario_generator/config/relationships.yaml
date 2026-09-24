@@ -1,0 +1,29 @@
+relationships:
+  # --- Braking system ---
+  - source: brake_pedal
+    target: brake_pressure
+    type: positive
+    lag_ms: 100
+    gain: 2.0
+    combine: replace
+    description: "Brake pedal pressure maps to hydraulic pressure"
+
+  # --- Wheel speed tracks vehicle speed ---
+  - source: vehicle_speed
+    target: wheel_speed
+    type: positive
+    lag_ms: 0
+    gain: 1.0
+    offset: 0
+    combine: replace
+    description: "Wheel speed tracks vehicle speed"
+
+  # --- Thermal warm-up ---
+  - source: engine_rpm
+    target: coolant_temperature
+    type: warmup
+    tau_s: 300
+    target_temp: 90
+    ambient_temp: 20
+    combine: replace
+    description: "Coolant warms up from ambient toward operating temp"

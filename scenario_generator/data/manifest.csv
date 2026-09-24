@@ -1,0 +1,5 @@
+vehicle_id,scenario_name,scenario_slug,file_type,relative_path,n_rows,size_bytes
+sedan_a,City Drive,city_drive,frames,sedan_a/city_drive.frames.csv,10200,304143
+sedan_a,City Drive,city_drive,signals,sedan_a/city_drive.signals.csv,6000,623586
+suv_b,Highway Cruise,highway_cruise,frames,suv_b/highway_cruise.frames.csv,15300,457143
+suv_b,Highway Cruise,highway_cruise,signals,suv_b/highway_cruise.signals.csv,9000,1037309

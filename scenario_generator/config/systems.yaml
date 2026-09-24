@@ -1,0 +1,20 @@
+systems:
+  powertrain:
+    description: "Engine and drivetrain"
+    signals:
+      - engine_rpm
+      - throttle_position
+      - coolant_temperature
+
+  braking:
+    description: "Braking system"
+    signals:
+      - brake_pressure
+      - brake_pedal
+      - wheel_speed
+
+  dynamics:
+    description: "Vehicle longitudinal dynamics"
+    signals:
+      - vehicle_speed
+      - longitudinal_acceleration
