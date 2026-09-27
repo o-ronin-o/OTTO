@@ -1,4 +1,3 @@
-```markdown
 # Synthetic CAN Data Generation & Fault Injection Framework
 ## Project Status — Stages 1 & 2
 
@@ -643,5 +642,5 @@ jupyter notebook notebooks/
 ---
 
 *End of document.*
-```
+
 
