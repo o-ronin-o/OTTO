@@ -1,9 +1,3 @@
-# Project Status Document — Stage 1 & Stage 2 (Current)
-
-Here's the complete documentation of everything we've built up to this point. Save this as `docs/project_status.md`.
-
----
-
 ```markdown
 # Synthetic CAN Data Generation & Fault Injection Framework
 ## Project Status — Stages 1 & 2
