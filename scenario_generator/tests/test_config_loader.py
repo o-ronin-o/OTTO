@@ -127,9 +127,9 @@ def test_get_messages_for_vehicle(loader):
 def test_load_all_keys(loader):
     all_cfg = loader.load_all()
     assert set(all_cfg.keys()) == {
-        "signals", "systems", "relationships", "vehicles", "message_sets"
+        "signals", "systems", "relationships", "vehicles",
+        "message_sets", "fault_types",
     }
-
 
 def test_validation_passes_on_good_config(loader):
     errors = loader.validate()
@@ -256,10 +256,7 @@ def test_invalid_config_dir_raises():
 # Acceptance test (mirrors the spec)
 # ----------------------------------------------------------------------
 
-def test_acceptance(loader):
-    errors = loader.validate()
-    assert errors == [], f"Validation failed: {errors}"
-
-    signals = loader.load_signals()
-    assert "engine_rpm" in signals
-    assert signals["engine_rpm"]["unit"] == "rpm"
+def test_validate_all_includes_scenarios(loader):
+    """validate_all() runs both config and scenario validation."""
+    errors = loader.validate_all()
+    assert errors == [], f"Expected no errors, got: {errors}"

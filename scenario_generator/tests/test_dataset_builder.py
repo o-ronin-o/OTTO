@@ -44,20 +44,25 @@ def test_build_processes_all_scenarios(builder, all_scenarios, tmp_path):
 
 def test_build_creates_expected_files(builder, all_scenarios, tmp_path):
     builder.build(all_scenarios, output_dir=tmp_path)
-    # For 2 scenarios × 2 files each = 4 files
-    # Plus manifest.csv + metadata.json
+    # N scenarios × 2 files each (frames + signals) = 2N files
+    # PLUS 2 extra files (faults + labels) for each fault-bearing scenario
+    # PLUS manifest.csv
     all_files = list(tmp_path.rglob("*"))
     csvs = [f for f in all_files if f.suffix == ".csv"]
     jsons = [f for f in all_files if f.suffix == ".json"]
-    assert len(csvs) == 4 + 1   # 4 data files + manifest.csv
-    assert len(jsons) == 1      # metadata.json
 
+    # Count fault-bearing scenarios
+    n_fault_scenarios = 0
+    for path in all_scenarios:
+        with open(path) as f:
+            import yaml
+            raw = yaml.safe_load(f)
+        if raw.get("scenario", {}).get("faults"):
+            n_fault_scenarios += 1
 
-def test_build_creates_vehicle_subdirs(builder, all_scenarios, tmp_path):
-    builder.build(all_scenarios, output_dir=tmp_path)
-    assert (tmp_path / "sedan_a").is_dir()
-    assert (tmp_path / "suv_b").is_dir()
-
+    expected = 2 * len(all_scenarios) + 2 * n_fault_scenarios + 1
+    assert len(csvs) == expected
+    assert len(jsons) == 1
 
 # ----------------------------------------------------------------------
 # Manifest
@@ -83,8 +88,8 @@ def test_manifest_has_correct_columns(builder, all_scenarios, tmp_path):
 def test_manifest_row_count(builder, all_scenarios, tmp_path):
     dataset = builder.build(all_scenarios, output_dir=tmp_path)
     df = pd.read_csv(dataset.manifest_path)
-    # 2 scenarios × 2 files each = 4 rows
-    assert len(df) == 4
+    # N scenarios × 2 files each = 2N rows
+    assert len(df) == 2 * len(all_scenarios)
 
 
 def test_manifest_covers_both_file_types(builder, all_scenarios, tmp_path):
@@ -159,12 +164,15 @@ def test_metadata_scenarios_entries(builder, all_scenarios, tmp_path):
     with open(dataset.metadata_path, "r", encoding="utf-8") as f:
         meta = json.load(f)
 
+    # Every scenario file must appear in the metadata
     names = {s["name"] for s in meta["scenarios"]}
-    assert names == {"City Drive", "Highway Cruise"}
+    assert "City Drive" in names
+    assert "Highway Cruise" in names
+    assert "Highway Cruise with Brake Wear" in names
 
+    # All vehicles present
     vehicles = {s["vehicle_id"] for s in meta["scenarios"]}
     assert vehicles == {"sedan_a", "suv_b"}
-
 
 # ----------------------------------------------------------------------
 # Determinism

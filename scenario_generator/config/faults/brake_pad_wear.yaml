@@ -1,0 +1,44 @@
+fault:
+  id: brake_pad_wear
+  physical_category: mechanical
+  observable_effect: drift
+  layer: signal
+  description: >
+    Reduced braking effectiveness due to loss of friction material on brake pads.
+    Hydraulic pressure develops normally, but the vehicle decelerates less than
+    the brake_pressure would predict.
+
+  parameters:
+    - name: severity_start
+      type: float
+      range: [0.0, 1.0]
+      description: >
+        Fractional loss of braking effectiveness at the start of the fault window.
+        0.0 = no loss, 1.0 = total loss.
+
+    - name: severity_end
+      type: float
+      range: [0.0, 1.0]
+      description: >
+        Fractional loss of braking effectiveness at the end of the fault window.
+
+    - name: progression
+      type: enum
+      values: [constant, linear, exponential, step]
+      default: linear
+      description: >
+        How severity evolves from severity_start to severity_end:
+          constant    → stays at severity_start
+          linear      → linear ramp
+          exponential → accelerating ramp
+          step        → jumps to severity_end at onset
+
+  targets:
+    signals: [longitudinal_acceleration]
+    messages: []
+
+  injection_rule: >
+    During the fault window, scale the braking contribution to
+    longitudinal_acceleration by (1 - severity(t)), where severity(t)
+    is computed from severity_start, severity_end, and progression.
+    Outside the fault window, the signal is unchanged.

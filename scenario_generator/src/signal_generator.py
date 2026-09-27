@@ -2,33 +2,25 @@
 Signal Generator — converts a scenario spec into physically coherent
 signal values over time.
 
-Design (Step 1, decisions A1/B1/C2/D1, refactored after validation):
-    A1 — fixed internal rate, scenario provides raw driver inputs
-    B1 — additive combination for same-target relationships
-    C2 — piecewise segments as scenario spec
-    D1 — coolant warms up monotonically (special `warmup` type)
+[Stage 1 docstring unchanged]
 
-Refactor notes:
-    - engine_rpm, longitudinal_acceleration, vehicle_speed are computed
-      in Phase 2 (dynamics) using vehicle mass, gear ratios, final drive,
-      and wheel radius.
-    - The old `throttle_position -> engine_rpm` and
-      `brake_pressure -> longitudinal_acceleration` relationships were
-      removed: they ignored mass and gearing and produced physically
-      incorrect behavior.
-    - vehicle_speed is computed ONLY in Phase 2. It must not be
-      re-derived by a declarative `integral` relationship, because that
-      would restart the integration from zero and destroy accumulated
-      velocity.
-    - Engine RPM uses a first-order lag filter (tau ≈ 150 ms) to model
-      engine rotational inertia, plus a sigmoid clutch blend to smooth
-      the slip-to-locked transition.
+Step 2.1a addition:
+    Scenario now carries `resolved_faults`: the fault declarations from
+    the YAML, with relative anchors (scenario_start, segment_start,
+    segment_end) resolved to absolute times.
+
+Step 2.1b addition:
+    SignalGenerator.generate() accepts an optional `faults` dict of
+    physics-input multipliers. The only supported key currently is
+    "brake_force_multiplier", which scales the braking force at each
+    timestep. Default (None or {}) → no fault, identical to Stage 1.
 """
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Any
 
 import numpy as np
 import pandas as pd
@@ -42,30 +34,304 @@ from src.config_loader import ConfigLoader
 # ----------------------------------------------------------------------
 
 @dataclass
+class ResolvedFault:
+    """A fault declaration with its relative anchors resolved to absolute time."""
+    id: str
+    type: str
+    onset_s: float
+    end_s: float
+    params: dict
+    # Registry metadata (for convenience downstream)
+    physical_category: str
+    observable_effect: str
+    layer: str
+    targets: dict
+
+    @property
+    def duration_s(self) -> float:
+        return self.end_s - self.onset_s
+
+    def contains(self, t_s: float) -> bool:
+        """True if time t_s falls inside [onset_s, end_s)."""
+        return self.onset_s <= t_s < self.end_s
+
+
+@dataclass
 class Scenario:
     name: str
     duration_s: float
     base_rate_hz: float
     vehicle_id: str
     segments: list[dict]
+    resolved_faults: list[ResolvedFault] = field(default_factory=list)
 
     @classmethod
-    def from_yaml(cls, path: str | Path) -> "Scenario":
+    def from_yaml(
+        cls,
+        path: str | Path,
+        fault_registry: dict[str, dict] | None = None,
+    ) -> "Scenario":
+        """
+        Load a scenario YAML. If `fault_registry` is provided and the
+        scenario declares `faults:`, the anchors are resolved to absolute
+        times using the segment timeline.
+
+        If `fault_registry` is None and faults are present, a ValueError
+        is raised — the caller must supply the registry to enable fault
+        resolution.
+        """
         with open(path, "r", encoding="utf-8") as f:
             raw = yaml.safe_load(f)
-        if "scenario" not in raw:
+
+        if not isinstance(raw, dict) or "scenario" not in raw:
             raise ValueError(f"{path} must have a top-level 'scenario' key")
+
         s = raw["scenario"]
         for key in ("name", "duration_s", "base_rate_hz", "vehicle_id", "segments"):
             if key not in s:
                 raise ValueError(f"Scenario missing required field: '{key}'")
-        return cls(
+
+        segments = list(s["segments"])
+        scenario = cls(
             name=s["name"],
             duration_s=float(s["duration_s"]),
             base_rate_hz=float(s["base_rate_hz"]),
             vehicle_id=s["vehicle_id"],
-            segments=s["segments"],
+            segments=segments,
+            resolved_faults=[],
         )
+
+        # Resolve faults if present
+        fault_decls = s.get("faults") or []
+        if fault_decls:
+            if fault_registry is None:
+                raise ValueError(
+                    f"Scenario '{scenario.name}' declares faults but no "
+                    f"fault_registry was provided to Scenario.from_yaml()"
+                )
+            scenario.resolved_faults = _resolve_faults(
+                fault_decls, segments, scenario.duration_s, fault_registry
+            )
+
+        return scenario
+
+
+# ----------------------------------------------------------------------
+# Fault resolution helpers
+# ----------------------------------------------------------------------
+
+_VALID_ANCHORS = {"scenario_start", "segment_start", "segment_end"}
+
+
+def _index_segments(segments: list[dict]) -> dict[str, dict]:
+    """Build {segment_name: segment_dict} for named segments only."""
+    index: dict[str, dict] = {}
+    for seg in segments:
+        name = seg.get("name")
+        if name is None:
+            continue
+        if not isinstance(name, str) or not name:
+            raise ValueError(f"Segment name must be a non-empty string, got: {name!r}")
+        if name in index:
+            raise ValueError(f"Duplicate segment name: '{name}'")
+        index[name] = seg
+    return index
+
+
+def _anchor_time(
+    anchor_spec: dict,
+    segment_index: dict[str, dict],
+    scenario_duration_s: float,
+) -> float:
+    """Resolve a single anchor specification to an absolute time."""
+    if not isinstance(anchor_spec, dict):
+        raise ValueError(f"Anchor must be a mapping, got: {anchor_spec!r}")
+
+    anchor = anchor_spec.get("anchor")
+    if anchor not in _VALID_ANCHORS:
+        raise ValueError(
+            f"Invalid anchor '{anchor}'. Valid: {sorted(_VALID_ANCHORS)}"
+        )
+
+    offset = float(anchor_spec.get("offset_s", 0.0))
+
+    if anchor == "scenario_start":
+        return 0.0 + offset
+
+    segment_name = anchor_spec.get("segment")
+    if not segment_name:
+        raise ValueError(
+            f"Anchor '{anchor}' requires a 'segment' field"
+        )
+    if segment_name not in segment_index:
+        raise ValueError(f"Unknown segment: '{segment_name}'")
+
+    seg = segment_index[segment_name]
+    if anchor == "segment_start":
+        return float(seg["t_start"]) + offset
+    if anchor == "segment_end":
+        return float(seg["t_end"]) + offset
+
+    raise ValueError(f"Unhandled anchor: {anchor}")  # pragma: no cover
+
+
+def _resolve_faults(
+    fault_decls: list[dict],
+    segments: list[dict],
+    duration_s: float,
+    fault_registry: dict[str, dict],
+) -> list[ResolvedFault]:
+    """Resolve a list of fault declarations into ResolvedFault objects."""
+    segment_index = _index_segments(segments)
+    resolved: list[ResolvedFault] = []
+    seen_ids: set[str] = set()
+
+    for i, decl in enumerate(fault_decls):
+        if not isinstance(decl, dict):
+            raise ValueError(f"Fault declaration #{i} must be a mapping")
+        prefix = f"Fault #{i}"
+
+        # --- id ---
+        fault_id = decl.get("id")
+        if not isinstance(fault_id, str) or not fault_id:
+            raise ValueError(f"{prefix}: 'id' must be a non-empty string")
+        if fault_id in seen_ids:
+            raise ValueError(f"{prefix}: duplicate fault id '{fault_id}'")
+        seen_ids.add(fault_id)
+
+        # --- type ---
+        fault_type = decl.get("type")
+        if not isinstance(fault_type, str):
+            raise ValueError(f"{prefix} ('{fault_id}'): 'type' must be a string")
+        if fault_type not in fault_registry:
+            raise ValueError(
+                f"{prefix} ('{fault_id}'): unknown fault type '{fault_type}'. "
+                f"Registered: {sorted(fault_registry.keys())}"
+            )
+        type_def = fault_registry[fault_type]
+
+        # --- onset ---
+        if "onset" not in decl:
+            raise ValueError(f"{prefix} ('{fault_id}'): missing 'onset'")
+        onset_s = _anchor_time(decl["onset"], segment_index, duration_s)
+
+        # --- end (may be null) ---
+        end_spec = decl.get("end", None)
+        if end_spec is None:
+            end_s = duration_s
+        else:
+            end_s = _anchor_time(end_spec, segment_index, duration_s)
+
+        # --- time bounds ---
+        if onset_s < 0:
+            raise ValueError(
+                f"{prefix} ('{fault_id}'): resolved onset {onset_s} is < 0"
+            )
+        if end_s > duration_s:
+            raise ValueError(
+                f"{prefix} ('{fault_id}'): resolved end {end_s} > "
+                f"scenario duration {duration_s}"
+            )
+        if onset_s >= end_s:
+            raise ValueError(
+                f"{prefix} ('{fault_id}'): onset ({onset_s}) must be < "
+                f"end ({end_s})"
+            )
+
+        # --- params ---
+        params = decl.get("params", {})
+        if not isinstance(params, dict):
+            raise ValueError(f"{prefix} ('{fault_id}'): 'params' must be a mapping")
+
+        declared_params = {p["name"]: p for p in type_def.get("parameters", [])}
+
+        # unknown params
+        for k in params:
+            if k not in declared_params:
+                raise ValueError(
+                    f"{prefix} ('{fault_id}'): unknown parameter '{k}'. "
+                    f"Declared: {sorted(declared_params.keys())}"
+                )
+
+        # missing required params (no default)
+        for name, p in declared_params.items():
+            if name not in params and "default" not in p:
+                raise ValueError(
+                    f"{prefix} ('{fault_id}'): missing required parameter '{name}'"
+                )
+
+        # fill defaults
+        resolved_params = {}
+        for name, p in declared_params.items():
+            if name in params:
+                value = params[name]
+            else:
+                value = p["default"]
+            resolved_params[name] = _validate_and_coerce_param(
+                value, p, prefix, fault_id
+            )
+
+        resolved.append(ResolvedFault(
+            id=fault_id,
+            type=fault_type,
+            onset_s=onset_s,
+            end_s=end_s,
+            params=resolved_params,
+            physical_category=type_def["physical_category"],
+            observable_effect=type_def["observable_effect"],
+            layer=type_def["layer"],
+            targets=type_def.get("targets", {}),
+        ))
+
+    return resolved
+
+
+def _validate_and_coerce_param(
+    value: Any,
+    param_spec: dict,
+    prefix: str,
+    fault_id: str,
+) -> Any:
+    """Validate and coerce one parameter value against its spec."""
+    ptype = param_spec["type"]
+    pname = param_spec["name"]
+    ctx = f"{prefix} ('{fault_id}') parameter '{pname}'"
+
+    if ptype == "float":
+        if not isinstance(value, (int, float)) or isinstance(value, bool):
+            raise ValueError(f"{ctx}: expected float, got {type(value).__name__}")
+        value = float(value)
+        rng = param_spec.get("range")
+        if rng and not (rng[0] <= value <= rng[1]):
+            raise ValueError(f"{ctx}: {value} outside range {rng}")
+        return value
+
+    if ptype == "int":
+        if not isinstance(value, int) or isinstance(value, bool):
+            raise ValueError(f"{ctx}: expected int, got {type(value).__name__}")
+        rng = param_spec.get("range")
+        if rng and not (rng[0] <= value <= rng[1]):
+            raise ValueError(f"{ctx}: {value} outside range {rng}")
+        return value
+
+    if ptype == "enum":
+        if value not in param_spec["values"]:
+            raise ValueError(
+                f"{ctx}: '{value}' not in {param_spec['values']}"
+            )
+        return value
+
+    if ptype == "bool":
+        if not isinstance(value, bool):
+            raise ValueError(f"{ctx}: expected bool, got {type(value).__name__}")
+        return value
+
+    if ptype == "string":
+        if not isinstance(value, str):
+            raise ValueError(f"{ctx}: expected string, got {type(value).__name__}")
+        return value
+
+    raise ValueError(f"{ctx}: unknown parameter type '{ptype}'")  # pragma: no cover
 
 
 # ----------------------------------------------------------------------
@@ -81,6 +347,11 @@ class SignalGenerator:
         2. Longitudinal dynamics: acceleration, speed, RPM
         3. Enforce declarative relationships (brake_pressure, wheel_speed,
            coolant_temperature)
+
+    Fault injection (Step 2.1b):
+        generate() accepts an optional `faults` dict of physics-input
+        multipliers. Currently only "brake_force_multiplier" is supported.
+        When None, behavior is identical to Stage 1.
     """
 
     # Physical constants
@@ -106,8 +377,35 @@ class SignalGenerator:
     # Public API
     # ------------------------------------------------------------------
 
-    def generate(self, scenario: Scenario) -> pd.DataFrame:
-        """Run the full pipeline for one scenario."""
+    def generate(
+        self,
+        scenario: Scenario,
+        *,
+        faults: dict[str, np.ndarray] | None = None,
+    ) -> pd.DataFrame:
+        """
+        Run the full pipeline for one scenario.
+
+        Parameters
+        ----------
+        scenario : Scenario
+            The scenario to generate. Faults declared on the scenario are
+            NOT applied here — pass them via the `faults` parameter for
+            explicit control.
+
+        faults : dict[str, np.ndarray] | None
+            Optional fault multipliers, keyed by physics input name.
+            Currently supported keys:
+              - "brake_force_multiplier": np.ndarray in [0, 1] of length n_steps
+                  Scales the braking force at each timestep.
+                  1.0 = no fault, 0.5 = 50% braking force.
+              None or missing key → no fault on that input.
+
+        Returns
+        -------
+        pd.DataFrame
+            The (possibly corrupted) signal DataFrame.
+        """
         vehicle = self.cfg.load_vehicles()[scenario.vehicle_id]
 
         dt = 1.0 / scenario.base_rate_hz
@@ -117,8 +415,8 @@ class SignalGenerator:
         # Phase 1 — driver inputs
         driver = self._build_driver_inputs(scenario, n_steps, dt)
 
-        # Phase 2 — dynamics (accel, speed, RPM)
-        dynamics = self._compute_dynamics(driver, vehicle, dt)
+        # Phase 2 — dynamics (accel, speed, RPM) with optional fault multipliers
+        dynamics = self._compute_dynamics(driver, vehicle, dt, faults=faults)
 
         # Phase 3 — declarative relationships
         signal_df = self._apply_relationships(driver, dynamics, dt)
@@ -167,6 +465,8 @@ class SignalGenerator:
         driver: dict[str, np.ndarray],
         vehicle: dict,
         dt: float,
+        *,
+        faults: dict[str, np.ndarray] | None = None,
     ) -> dict[str, np.ndarray]:
         """
         Physics engine. Computes:
@@ -175,15 +475,16 @@ class SignalGenerator:
             - engine_rpm
 
         Engine RPM is filtered by a first-order lag (tau = 150 ms) to
-        model engine rotational inertia. This eliminates non-physical
-        instantaneous RPM step changes at gear shifts. A sigmoid clutch
-        blend smooths the slip-to-locked transition at low speed.
+        model engine rotational inertia. A sigmoid clutch blend smooths
+        the slip-to-locked transition at low speed.
+
+        Optional fault multipliers:
+            - "brake_force_multiplier": array in [0,1] scaling the brake force
         """
         throttle = driver["throttle_position"] / 100.0   # 0–1
         brake = driver["brake_pedal"] / 100.0            # 0–1
         gear = driver["gear"]
 
-        # Vehicle parameters
         mass = float(vehicle["mass_kg"])
         max_brake = float(vehicle["max_brake_force_n"])
         max_torque = float(vehicle["max_engine_torque_nm"])
@@ -197,6 +498,18 @@ class SignalGenerator:
         idle_rpm = float(vehicle["idle_rpm"])
 
         n = len(throttle)
+
+        # --- Resolve fault multipliers (default = no fault) ---
+        if faults and "brake_force_multiplier" in faults:
+            brake_force_multiplier = faults["brake_force_multiplier"]
+            if len(brake_force_multiplier) != n:
+                raise ValueError(
+                    f"brake_force_multiplier length {len(brake_force_multiplier)} "
+                    f"does not match simulation length {n}"
+                )
+        else:
+            brake_force_multiplier = np.ones(n)
+
         speed_ms = np.zeros(n)
         accel = np.zeros(n)
         rpm = np.zeros(n)
@@ -216,8 +529,8 @@ class SignalGenerator:
             wheel_torque = engine_torque * gear_ratio * final_drive * eff
             f_engine = wheel_torque / wheel_radius
 
-            # Resistive forces
-            f_brake = brake[i] * max_brake
+            # Resistive forces (brake force scaled by optional fault multiplier)
+            f_brake = brake[i] * max_brake * brake_force_multiplier[i]
             f_drag = 0.5 * self.RHO_AIR * cd * area * v * v
             f_roll = crr * mass * self.GRAVITY
 
@@ -252,7 +565,7 @@ class SignalGenerator:
 
         return {
             "longitudinal_acceleration": accel,
-            "vehicle_speed": speed_ms * 3.6,   # convert to km/h
+            "vehicle_speed": speed_ms * 3.6,
             "engine_rpm": rpm,
         }
 

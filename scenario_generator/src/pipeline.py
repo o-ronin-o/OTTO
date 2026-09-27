@@ -2,7 +2,8 @@
 Pipeline — orchestrates the full synthetic CAN data generation workflow.
 
 Chain:
-    Scenario → SignalGenerator → CANEncoder → FrameScheduler → CSV output
+    Scenario → SignalGenerator → [SignalFaultInjector] → CANEncoder
+             → FrameScheduler → [FaultLabelBuilder] → CSV output
 
 Design (Step 4):
     - Two files per scenario:
@@ -12,33 +13,52 @@ Design (Step 4):
     - Directory structure: data/{vehicle_id}/{scenario_name}.*.csv
     - CSV encoding: UTF-8, newline='', deterministic column order.
 
+Design (Step 2.1b):
+    - If the scenario declares signal-layer faults, the injector is
+      applied between SignalGenerator and CANEncoder. Frame-layer faults
+      are handled later (Step 2.5).
+    - The list of applied faults is carried on PipelineResult for
+      downstream label generation (Step 2.2).
+
+Design (Step 2.2):
+    - If applied_faults is non-empty, two additional files are written:
+        {vehicle_id}/{scenario_name}.faults.csv   (per-event table)
+        {vehicle_id}/{scenario_name}.labels.csv   (per-frame labels)
+    - Scenarios without faults do NOT produce these files.
+
 Outputs:
     - frames CSV:  timestamp_ms, can_id, payload_hex
     - signals CSV: time_s, timestamp_ms, <signals...>
+    - faults CSV:  one row per applied fault (event summary)
+    - labels CSV:  one row per frame (aligned with frames.csv)
 """
 
 from __future__ import annotations
 
 import csv
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
 import pandas as pd
 
 from src.can_encoder import CANEncoder
 from src.config_loader import ConfigLoader
+from src.fault_labels import FaultLabelBuilder
 from src.frame_scheduler import FrameScheduler, ScheduledFrame
 from src.signal_generator import Scenario, SignalGenerator
 
 
 @dataclass
 class PipelineResult:
-    """Returned by Pipeline.run() — paths to the two output files."""
+    """Returned by Pipeline.run() — paths to the output files."""
     frames_path: Path
     signals_path: Path
     n_frames: int
     n_signal_rows: int
     scenario: Scenario
+    applied_faults: list = field(default_factory=list)
+    faults_path: Path | None = None
+    labels_path: Path | None = None
 
 
 class Pipeline:
@@ -78,6 +98,8 @@ class Pipeline:
             Root output directory. Files written to:
                 {output_dir}/{vehicle_id}/{scenario_name}.frames.csv
                 {output_dir}/{vehicle_id}/{scenario_name}.signals.csv
+                {output_dir}/{vehicle_id}/{scenario_name}.faults.csv   (if faults)
+                {output_dir}/{vehicle_id}/{scenario_name}.labels.csv   (if faults)
 
         Returns
         -------
@@ -85,7 +107,8 @@ class Pipeline:
             Paths and metadata for the generated files.
         """
         scenario_path = Path(scenario_path)
-        scenario = Scenario.from_yaml(scenario_path)
+        fault_registry = self.loader.load_fault_types()
+        scenario = Scenario.from_yaml(scenario_path, fault_registry=fault_registry)
 
         # --- Validate vehicle exists ---
         if scenario.vehicle_id not in self.vehicles:
@@ -96,8 +119,16 @@ class Pipeline:
 
         vehicle = self.vehicles[scenario.vehicle_id]
 
-        # --- Stage 1: signals ---
-        signals_df = self.generator.generate(scenario)
+        # --- Stage 1: signals (with optional signal-layer fault injection) ---
+        if scenario.resolved_faults:
+            # Local import to avoid a circular dependency at module load time
+            from src.fault_injector import SignalFaultInjector
+
+            injector = SignalFaultInjector(self.loader, self.generator)
+            signals_df, applied_faults = injector.apply(scenario)
+        else:
+            signals_df = self.generator.generate(scenario)
+            applied_faults = []
 
         # --- Stage 2: encode ---
         encoder = CANEncoder(vehicle, self.signals_cfg)
@@ -112,7 +143,7 @@ class Pipeline:
         )
         scheduled = scheduler.schedule(frames_by_id)
 
-        # --- Stage 4: write CSVs ---
+        # --- Stage 4: write signals + frames CSVs ---
         output_dir = Path(output_dir)
         vehicle_dir = output_dir / scenario.vehicle_id
         vehicle_dir.mkdir(parents=True, exist_ok=True)
@@ -129,12 +160,29 @@ class Pipeline:
             encoder=encoder,
         )
 
+        # --- Stage 5 (conditional): write fault label files ---
+        faults_path: Path | None = None
+        labels_path: Path | None = None
+
+        if applied_faults:
+            label_builder = FaultLabelBuilder(self.loader)
+            event_rows, frame_rows = label_builder.build(scheduled, applied_faults)
+
+            faults_path = vehicle_dir / f"{safe_name}.faults.csv"
+            labels_path = vehicle_dir / f"{safe_name}.labels.csv"
+
+            self._write_dict_rows_csv(faults_path, event_rows)
+            self._write_dict_rows_csv(labels_path, frame_rows)
+
         return PipelineResult(
             frames_path=frames_path,
             signals_path=signals_path,
             n_frames=len(scheduled),
             n_signal_rows=len(signals_df),
             scenario=scenario,
+            applied_faults=applied_faults,
+            faults_path=faults_path,
+            labels_path=labels_path,
         )
 
     # ------------------------------------------------------------------
@@ -199,6 +247,23 @@ class Pipeline:
             out[col] = df[col]
 
         out.to_csv(path, index=False, encoding="utf-8")
+
+    @staticmethod
+    def _write_dict_rows_csv(path: Path, rows: list[dict]) -> None:
+        """
+        Write a list of dicts to CSV.
+
+        Column order comes from the first row's keys. If `rows` is empty,
+        nothing is written (no headers).
+        """
+        if not rows:
+            return
+        columns = list(rows[0].keys())
+        with open(path, "w", newline="", encoding="utf-8") as f:
+            writer = csv.DictWriter(f, fieldnames=columns)
+            writer.writeheader()
+            for row in rows:
+                writer.writerow(row)
 
     @staticmethod
     def _slugify(name: str) -> str:

@@ -1,0 +1,286 @@
+"""
+Unit tests for FaultLabelBuilder (Stage 2, Step 2.2).
+
+Run with:  pytest tests/test_fault_labels.py -v
+"""
+
+from pathlib import Path
+
+import pandas as pd
+import pytest
+
+from src.config_loader import ConfigLoader
+from src.fault_injector import AppliedFault, _compute_severity_at
+from src.fault_labels import FaultLabelBuilder
+from src.frame_scheduler import ScheduledFrame
+
+
+CONFIG_DIR = Path(__file__).parent.parent / "config"
+
+
+# ----------------------------------------------------------------------
+# Fixtures
+# ----------------------------------------------------------------------
+
+@pytest.fixture
+def loader() -> ConfigLoader:
+    return ConfigLoader(CONFIG_DIR)
+
+
+@pytest.fixture
+def builder(loader) -> FaultLabelBuilder:
+    return FaultLabelBuilder(loader)
+
+
+@pytest.fixture
+def frames_20s() -> list[ScheduledFrame]:
+    """A small frame stream: 3 CAN IDs at different rates, 20 s."""
+    frames: list[ScheduledFrame] = []
+    for t_ms in range(0, 20000, 10):
+        frames.append(ScheduledFrame(timestamp_ms=t_ms, can_id=0x100, payload=bytes(8)))
+        if t_ms % 20 == 0:
+            frames.append(ScheduledFrame(timestamp_ms=t_ms, can_id=0x1A0, payload=bytes(8)))
+        if t_ms % 50 == 0:
+            frames.append(ScheduledFrame(timestamp_ms=t_ms, can_id=0x120, payload=bytes(8)))
+    frames.sort(key=lambda f: (f.timestamp_ms, f.can_id))
+    return frames
+
+
+def _make_applied_fault(
+    fault_id="f1",
+    fault_type="brake_pad_wear",
+    onset_s=5.0,
+    end_s=15.0,
+    severity_start=0.0,
+    severity_end=0.4,
+    progression="linear",
+    physical_category="mechanical",
+    observable_effect="drift",
+    affected_signals=None,
+) -> AppliedFault:
+    return AppliedFault(
+        fault_id=fault_id,
+        fault_type=fault_type,
+        onset_s=onset_s,
+        end_s=end_s,
+        severity_start=severity_start,
+        severity_end=severity_end,
+        progression=progression,
+        physical_category=physical_category,
+        observable_effect=observable_effect,
+        affected_signals=affected_signals or ["longitudinal_acceleration"],
+    )
+
+
+# ----------------------------------------------------------------------
+# Per-event table
+# ----------------------------------------------------------------------
+
+def test_no_faults_gives_empty_event_rows(builder, frames_20s):
+    event_rows, _ = builder.build(frames_20s, [])
+    assert event_rows == []
+
+
+def test_single_fault_event_row(builder, frames_20s):
+    f = _make_applied_fault()
+    event_rows, _ = builder.build(frames_20s, [f])
+    assert len(event_rows) == 1
+    row = event_rows[0]
+    assert row["fault_id"] == "f1"
+    assert row["fault_type"] == "brake_pad_wear"
+    assert row["onset_s"] == 5.0
+    assert row["end_s"] == 15.0
+    assert row["physical_category"] == "mechanical"
+    assert row["observable_effect"] == "drift"
+    assert row["affected_signals"] == "longitudinal_acceleration"
+
+
+def test_multiple_faults_give_multiple_event_rows(builder, frames_20s):
+    f1 = _make_applied_fault("f1", onset_s=5.0, end_s=10.0)
+    f2 = _make_applied_fault("f2", onset_s=12.0, end_s=15.0)
+    event_rows, _ = builder.build(frames_20s, [f1, f2])
+    assert len(event_rows) == 2
+    assert event_rows[0]["fault_id"] == "f1"
+    assert event_rows[1]["fault_id"] == "f2"
+
+
+def test_affected_signals_sorted_and_semicolon_joined(builder, frames_20s):
+    f = _make_applied_fault(
+        affected_signals=["vehicle_speed", "longitudinal_acceleration"]
+    )
+    event_rows, _ = builder.build(frames_20s, [f])
+    assert event_rows[0]["affected_signals"] == "longitudinal_acceleration;vehicle_speed"
+
+
+# ----------------------------------------------------------------------
+# Per-frame table — basic structure
+# ----------------------------------------------------------------------
+
+def test_frame_rows_count_matches_frames(builder, frames_20s):
+    _, frame_rows = builder.build(frames_20s, [])
+    assert len(frame_rows) == len(frames_20s)
+
+
+def test_frame_row_alignment(builder, frames_20s):
+    _, frame_rows = builder.build(frames_20s, [])
+    for frame, row in zip(frames_20s, frame_rows):
+        assert row["timestamp_ms"] == frame.timestamp_ms
+        assert row["can_id"] == f"0x{frame.can_id:03X}"
+
+
+def test_no_active_fault_when_list_empty(builder, frames_20s):
+    _, frame_rows = builder.build(frames_20s, [])
+    for row in frame_rows:
+        assert row["is_fault"] == 0
+        assert row["fault_count"] == 0
+        assert row["severity_max"] == 0.0
+        assert row["fault_ids"] == ""
+        assert row["fault_types"] == ""
+        assert row["physical_categories"] == ""
+        assert row["observable_effects"] == ""
+
+
+# ----------------------------------------------------------------------
+# Per-frame table — active faults
+# ----------------------------------------------------------------------
+
+def test_frames_before_onset_are_not_faulty(builder, frames_20s):
+    f = _make_applied_fault(onset_s=5.0, end_s=15.0)
+    _, frame_rows = builder.build(frames_20s, [f])
+    before = [r for r in frame_rows if r["timestamp_ms"] < 5000]
+    assert all(r["is_fault"] == 0 for r in before)
+
+
+def test_frames_after_end_are_not_faulty(builder, frames_20s):
+    f = _make_applied_fault(onset_s=5.0, end_s=15.0)
+    _, frame_rows = builder.build(frames_20s, [f])
+    after = [r for r in frame_rows if r["timestamp_ms"] >= 15000]
+    assert all(r["is_fault"] == 0 for r in after)
+
+
+def test_frames_inside_window_are_faulty(builder, frames_20s):
+    f = _make_applied_fault(onset_s=5.0, end_s=15.0)
+    _, frame_rows = builder.build(frames_20s, [f])
+    inside = [r for r in frame_rows if 5000 <= r["timestamp_ms"] < 15000]
+    assert all(r["is_fault"] == 1 for r in inside)
+    assert all(r["fault_ids"] == "f1" for r in inside)
+    assert all(r["fault_count"] == 1 for r in inside)
+
+
+def test_onset_frame_is_faulty(builder):
+    """Half-open: frame at exactly onset_s is faulty."""
+    frames = [ScheduledFrame(timestamp_ms=5000, can_id=0x100, payload=bytes(8))]
+    f = _make_applied_fault(onset_s=5.0, end_s=15.0)
+    _, frame_rows = builder.build(frames, [f])
+    assert frame_rows[0]["is_fault"] == 1
+
+
+def test_end_frame_is_not_faulty(builder):
+    """Half-open: frame at exactly end_s is NOT faulty."""
+    frames = [ScheduledFrame(timestamp_ms=15000, can_id=0x100, payload=bytes(8))]
+    f = _make_applied_fault(onset_s=5.0, end_s=15.0)
+    _, frame_rows = builder.build(frames, [f])
+    assert frame_rows[0]["is_fault"] == 0
+
+
+# ----------------------------------------------------------------------
+# Overlapping faults
+# ----------------------------------------------------------------------
+
+def test_overlapping_faults_produce_multiple_ids(builder, frames_20s):
+    f1 = _make_applied_fault("alpha", onset_s=5.0, end_s=15.0)
+    f2 = _make_applied_fault("beta", onset_s=10.0, end_s=15.0)
+    _, frame_rows = builder.build(frames_20s, [f1, f2])
+    overlap = [r for r in frame_rows if 10000 <= r["timestamp_ms"] < 15000]
+    assert all(r["fault_count"] == 2 for r in overlap)
+    assert all(r["fault_ids"] == "alpha;beta" for r in overlap)
+
+
+def test_fault_ids_are_sorted(builder, frames_20s):
+    f1 = _make_applied_fault("zeta", onset_s=5.0, end_s=15.0)
+    f2 = _make_applied_fault("alpha", onset_s=5.0, end_s=15.0)
+    _, frame_rows = builder.build(frames_20s, [f1, f2])
+    inside = [r for r in frame_rows if 5000 <= r["timestamp_ms"] < 15000]
+    assert all(r["fault_ids"] == "alpha;zeta" for r in inside)
+
+
+def test_severity_max_is_max_of_active(builder, frames_20s):
+    f1 = _make_applied_fault("f1", onset_s=5.0, end_s=15.0,
+                             severity_start=0.3, severity_end=0.3,
+                             progression="constant")
+    f2 = _make_applied_fault("f2", onset_s=5.0, end_s=15.0,
+                             severity_start=0.5, severity_end=0.5,
+                             progression="constant")
+    _, frame_rows = builder.build(frames_20s, [f1, f2])
+    inside = [r for r in frame_rows if 5000 <= r["timestamp_ms"] < 15000]
+    # Both faults constant at 0.3 and 0.5 → severity_max = 0.5
+    assert all(abs(r["severity_max"] - 0.5) < 1e-9 for r in inside)
+
+
+# ----------------------------------------------------------------------
+# Metadata columns
+# ----------------------------------------------------------------------
+
+def test_metadata_columns_present_when_active(builder, frames_20s):
+    f = _make_applied_fault(
+        fault_type="brake_pad_wear",
+        physical_category="mechanical",
+        observable_effect="drift",
+    )
+    _, frame_rows = builder.build(frames_20s, [f])
+    inside = [r for r in frame_rows if 5000 <= r["timestamp_ms"] < 15000]
+    assert all(r["fault_types"] == "brake_pad_wear" for r in inside)
+    assert all(r["physical_categories"] == "mechanical" for r in inside)
+    assert all(r["observable_effects"] == "drift" for r in inside)
+
+
+# ----------------------------------------------------------------------
+# Determinism
+# ----------------------------------------------------------------------
+
+def test_build_is_deterministic(builder, frames_20s):
+    f = _make_applied_fault()
+    e1, r1 = builder.build(frames_20s, [f])
+    e2, r2 = builder.build(frames_20s, [f])
+    assert e1 == e2
+    assert r1 == r2
+
+
+# ----------------------------------------------------------------------
+# End-to-end with the seed scenario
+# ----------------------------------------------------------------------
+
+def test_seed_scenario_produces_labels(loader):
+    """Run the full pipeline on the seed scenario and verify labels."""
+    from src.pipeline import Pipeline
+
+    pipeline = Pipeline(CONFIG_DIR)
+    result = pipeline.run(
+        CONFIG_DIR / "scenarios" / "highway_brake_wear_gradual.yaml",
+        output_dir=Path("data") / "fault_labels_test",
+    )
+
+    assert result.faults_path is not None
+    assert result.labels_path is not None
+    assert result.faults_path.exists()
+    assert result.labels_path.exists()
+
+    # faults.csv has one row per applied fault
+    faults_df = pd.read_csv(result.faults_path)
+    assert len(faults_df) == len(result.applied_faults)
+    assert set(faults_df["fault_id"]) == {a.fault_id for a in result.applied_faults}
+
+    # labels.csv has one row per frame
+    frames_df = pd.read_csv(result.frames_path)
+    labels_df = pd.read_csv(result.labels_path)
+    assert len(labels_df) == len(frames_df)
+
+    # Alignment
+    assert (labels_df["timestamp_ms"].values == frames_df["timestamp_ms"].values).all()
+    assert (labels_df["can_id"].values == frames_df["can_id"].values).all()
+
+    # Some frames must be flagged as faulty
+    assert (labels_df["is_fault"] == 1).any()
+
+    # Some frames must be clean
+    assert (labels_df["is_fault"] == 0).any()
