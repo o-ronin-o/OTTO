@@ -11,9 +11,20 @@ Step 2.1a addition:
 
 Step 2.1b addition:
     SignalGenerator.generate() accepts an optional `faults` dict of
-    physics-input multipliers. The only supported key currently is
-    "brake_force_multiplier", which scales the braking force at each
-    timestep. Default (None or {}) → no fault, identical to Stage 1.
+    physics-input multipliers:
+      - "brake_force_multiplier": scales the braking force
+      - "engine_torque_multiplier": scales the engine's drive torque
+        (used for torque-drop and misfire faults)
+
+Step 2.6 / Phase A addition:
+    A new signal `crank_position` exposes the crankshaft's accumulated
+    rotation angle (degrees, [0, 360)).
+
+    The engine RPM is modelled kinematically: it tracks wheel speed when
+    the clutch is engaged, and slips to a throttle-driven RPM below the
+    engagement threshold. This replaces a previous torque-balance model
+    that proved unstable at low speeds (the crankshaft's small inertia
+    caused it to free-rev to redline in <1 s).
 """
 
 from __future__ import annotations
@@ -344,14 +355,25 @@ class SignalGenerator:
 
     Three phases:
         1. Build raw driver-input arrays from piecewise segments
-        2. Longitudinal dynamics: acceleration, speed, RPM
+        2. Longitudinal dynamics + kinematic engine RPM + crank position
         3. Enforce declarative relationships (brake_pressure, wheel_speed,
            coolant_temperature)
 
     Fault injection (Step 2.1b):
         generate() accepts an optional `faults` dict of physics-input
-        multipliers. Currently only "brake_force_multiplier" is supported.
-        When None, behavior is identical to Stage 1.
+        multipliers. Supported keys:
+          - "brake_force_multiplier": scales braking force
+          - "engine_torque_multiplier": scales engine drive torque
+
+    Engine RPM model (Phase A — kinematic):
+        When the clutch is engaged (v >= CLUTCH_ENGAGE_KMH), engine RPM is
+        locked to wheel speed via the gearbox. Below that threshold, a
+        sigmoid blend transitions to a throttle-driven slip RPM. A first-
+        order lag filter models engine rotational inertia.
+
+    Crank position:
+        Derived from engine RPM: d(position)/dt = RPM × 6 (deg/s).
+        Wrapped to [0, 360).
     """
 
     # Physical constants
@@ -359,14 +381,14 @@ class SignalGenerator:
     GRAVITY = 9.81             # m/s^2
 
     # Clutch engagement threshold — below this speed the clutch slips
-    # and the engine can rev independently of wheel speed.
+    # and the engine RPM is decoupled from wheel speed.
     CLUTCH_ENGAGE_KMH = 5.0
 
-    # Throttle blip scale during clutch slip (rpm per percent throttle)
-    SLIP_RPM_PER_PCT = 30.0
+    # Engine RPM first-order lag time constant (s)
+    TAU_ENGINE_S = 0.08
 
-    # Engine rotational inertia — time constant for RPM response
-    TAU_ENGINE_S = 0.15
+    # Slip RPM gain: slip_rpm = idle + throttle × SLIP_RPM_GAIN
+    SLIP_RPM_GAIN = 2500.0
 
     def __init__(self, config_loader: ConfigLoader):
         self.cfg = config_loader
@@ -390,16 +412,14 @@ class SignalGenerator:
         ----------
         scenario : Scenario
             The scenario to generate. Faults declared on the scenario are
-            NOT applied here — pass them via the `faults` parameter for
-            explicit control.
+            NOT applied here — pass them via the `faults` parameter.
 
         faults : dict[str, np.ndarray] | None
             Optional fault multipliers, keyed by physics input name.
-            Currently supported keys:
-              - "brake_force_multiplier": np.ndarray in [0, 1] of length n_steps
-                  Scales the braking force at each timestep.
-                  1.0 = no fault, 0.5 = 50% braking force.
-              None or missing key → no fault on that input.
+            Supported keys:
+              - "brake_force_multiplier": np.ndarray in [0, 1]
+              - "engine_torque_multiplier": np.ndarray in [0, 1]
+            None or missing key → no fault on that input.
 
         Returns
         -------
@@ -412,16 +432,9 @@ class SignalGenerator:
         n_steps = int(round(scenario.duration_s * scenario.base_rate_hz))
         time_s = np.arange(n_steps) * dt
 
-        # Phase 1 — driver inputs
         driver = self._build_driver_inputs(scenario, n_steps, dt)
-
-        # Phase 2 — dynamics (accel, speed, RPM) with optional fault multipliers
         dynamics = self._compute_dynamics(driver, vehicle, dt, faults=faults)
-
-        # Phase 3 — declarative relationships
         signal_df = self._apply_relationships(driver, dynamics, dt)
-
-        # Phase 4 — clamp to declared ranges
         signal_df = self._clamp_ranges(signal_df)
 
         signal_df.insert(0, "time_s", time_s)
@@ -457,7 +470,7 @@ class SignalGenerator:
         }
 
     # ------------------------------------------------------------------
-    # Phase 2 — longitudinal dynamics
+    # Phase 2 — longitudinal dynamics + kinematic engine RPM
     # ------------------------------------------------------------------
 
     def _compute_dynamics(
@@ -472,19 +485,25 @@ class SignalGenerator:
         Physics engine. Computes:
             - longitudinal_acceleration
             - vehicle_speed
-            - engine_rpm
+            - engine_rpm (kinematically coupled to wheel speed)
+            - crank_position (integrated from engine RPM)
 
-        Engine RPM is filtered by a first-order lag (tau = 150 ms) to
-        model engine rotational inertia. A sigmoid clutch blend smooths
-        the slip-to-locked transition at low speed.
+        Engine RPM model:
+            The clutch transitions from slipping (below CLUTCH_ENGAGE_KMH)
+            to locked (above). A sigmoid blend smooths this transition.
+            When slipping, target RPM is driven by throttle (slip_rpm).
+            When locked, target RPM = wheel_rpm × gear_ratio × final_drive.
+            A first-order lag filter models engine rotational inertia.
 
-        Optional fault multipliers:
-            - "brake_force_multiplier": array in [0,1] scaling the brake force
+        Crank position:
+            Integrated from engine RPM: rate = RPM × 6 deg/s.
+            Wrapped to [0, 360).
         """
         throttle = driver["throttle_position"] / 100.0   # 0–1
         brake = driver["brake_pedal"] / 100.0            # 0–1
         gear = driver["gear"]
 
+        # Vehicle parameters
         mass = float(vehicle["mass_kg"])
         max_brake = float(vehicle["max_brake_force_n"])
         max_torque = float(vehicle["max_engine_torque_nm"])
@@ -496,10 +515,12 @@ class SignalGenerator:
         wheel_radius = float(vehicle["wheel_radius_m"])
         eff = float(vehicle["drivetrain_efficiency"])
         idle_rpm = float(vehicle["idle_rpm"])
+        redline_rpm = float(vehicle["redline_rpm"])
+        idle_throttle_frac = float(vehicle["idle_throttle_pct"]) / 100.0
 
         n = len(throttle)
 
-        # --- Resolve fault multipliers (default = no fault) ---
+        # --- Resolve fault multipliers ---
         if faults and "brake_force_multiplier" in faults:
             brake_force_multiplier = faults["brake_force_multiplier"]
             if len(brake_force_multiplier) != n:
@@ -510,63 +531,117 @@ class SignalGenerator:
         else:
             brake_force_multiplier = np.ones(n)
 
+        if faults and "engine_torque_multiplier" in faults:
+            engine_torque_multiplier = faults["engine_torque_multiplier"]
+            if len(engine_torque_multiplier) != n:
+                raise ValueError(
+                    f"engine_torque_multiplier length {len(engine_torque_multiplier)} "
+                    f"does not match simulation length {n}"
+                )
+        else:
+            engine_torque_multiplier = np.ones(n)
+
+        # --- State arrays ---
         speed_ms = np.zeros(n)
         accel = np.zeros(n)
         rpm = np.zeros(n)
+        crank_pos = np.zeros(n)
+
         rpm[0] = idle_rpm
+        crank_pos[0] = 0.0
 
         alpha_rpm = dt / (self.TAU_ENGINE_S + dt)
 
         for i in range(n):
             v = speed_ms[i - 1] if i > 0 else 0.0
-
-            # Gear ratio lookup
             g = int(round(gear[i]))
             gear_ratio = float(gear_ratios.get(g, gear_ratios[max(gear_ratios)]))
 
-            # Tractive force (linear torque model B1)
-            engine_torque = throttle[i] * max_torque
-            wheel_torque = engine_torque * gear_ratio * final_drive * eff
-            f_engine = wheel_torque / wheel_radius
+            # --- Effective throttle (smooth idle floor) ---
+            # Idle throttle applies at rest and fades smoothly to zero
+            # as the vehicle starts moving. A hard threshold at a fixed
+            # speed causes numerical chatter.
+            idle_ramp_speed_ms = 2.0 / 3.6   # 2 km/h in m/s
+            if v < idle_ramp_speed_ms and throttle[i] < idle_throttle_frac:
+                idle_blend = 1.0 - (v / idle_ramp_speed_ms)
+                idle_contribution = idle_throttle_frac * idle_blend
+                eff_throttle = max(throttle[i], idle_contribution)
+            else:
+                eff_throttle = throttle[i]
+            # --- Engine torque ---
+            T_engine = eff_throttle * max_torque * engine_torque_multiplier[i]
 
-            # Resistive forces (brake force scaled by optional fault multiplier)
+            # --- Resistive forces ---
             f_brake = brake[i] * max_brake * brake_force_multiplier[i]
             f_drag = 0.5 * self.RHO_AIR * cd * area * v * v
             f_roll = crr * mass * self.GRAVITY
 
+            # --- Tractive force at wheels ---
+            wheel_torque = T_engine * gear_ratio * final_drive * eff
+            f_engine = wheel_torque / wheel_radius
+
+            # --- Vehicle dynamics ---
             f_net = f_engine - f_brake - f_drag - f_roll
-            if v <= 0.0 and f_net < 0:
+
+            # At rest, if the engine can't overcome static resistance,
+            # the vehicle stays put. Otherwise, normal dynamics apply.
+            if v <= 1e-5 and f_engine <= (f_brake + f_roll):
                 f_net = 0.0
+                a = 0.0
+            else:
+                if v <= 0.0 and f_net < 0:
+                    f_net = 0.0
+                a = f_net / mass
 
-            a = f_net / mass
             accel[i] = a
-
             if i > 0:
                 speed_ms[i] = max(0.0, v + a * dt)
             else:
                 speed_ms[i] = 0.0
-
-            # --- Engine RPM (sigmoid clutch blend + first-order lag) ---
-            speed_kmh = speed_ms[i] * 3.6
-            wheel_rpm = (speed_ms[i] * 60.0) / (2.0 * np.pi * wheel_radius)
+            # --- Kinematic engine RPM ---
+            v_new = speed_ms[i]
+            speed_kmh = v_new * 3.6
+            wheel_rpm = (v_new * 60.0) / (2.0 * np.pi * wheel_radius)
             locked_rpm = wheel_rpm * gear_ratio * final_drive
-            slip_rpm = idle_rpm + throttle[i] * self.SLIP_RPM_PER_PCT * 100.0
 
-            # Sigmoid blend: 0 → pure slip, 1 → pure locked
+            # Slip RPM: throttle-driven flare when clutch is disengaged
+            slip_rpm = idle_rpm + eff_throttle * self.SLIP_RPM_GAIN
+
+            # Sigmoid blend between slipping and locked
             x = (speed_kmh - self.CLUTCH_ENGAGE_KMH) / (self.CLUTCH_ENGAGE_KMH * 0.5)
-            blend = 1.0 / (1.0 + np.exp(-x))
-            target_rpm = (1.0 - blend) * slip_rpm + blend * max(idle_rpm, locked_rpm)
+            x_clamped = max(-10.0, min(10.0, x))
+            blend = 1.0 / (1.0 + np.exp(-x_clamped))
 
-            # First-order lag filter (models engine rotational inertia)
-            if i == 0:
-                rpm[i] = target_rpm
-            else:
+            target_rpm = (1.0 - blend) * slip_rpm + blend * max(idle_rpm, locked_rpm)
+            target_rpm = min(target_rpm, redline_rpm)
+
+            # --- Torque multiplier effect on RPM ---
+            # A reduction in engine torque prevents RPM from rising to
+            # the target. Scale the deviation-from-idle by the torque
+            # multiplier. Safe because multiplier ∈ [0, 1]: target_rpm
+            # remains bounded between idle_rpm and the kinematic target.
+            torque_mult = engine_torque_multiplier[i]
+            target_rpm = idle_rpm + (target_rpm - idle_rpm) * torque_mult
+
+            # Reapply redline cap in case future faults use multiplier > 1
+            target_rpm = min(target_rpm, redline_rpm)
+
+            # First-order lag
+            if i > 0:
                 rpm[i] = rpm[i - 1] + alpha_rpm * (target_rpm - rpm[i - 1])
+            else:
+                rpm[i] = idle_rpm
+            # --- Crank position integration ---
+            # deg/s = RPM × 360 / 60 = RPM × 6
+            angle_delta = (rpm[i] * 6.0) * dt
+            prev_angle = crank_pos[i - 1] if i > 0 else 0.0
+            crank_pos[i] = (prev_angle + angle_delta) % 360.0
 
         return {
             "longitudinal_acceleration": accel,
             "vehicle_speed": speed_ms * 3.6,
             "engine_rpm": rpm,
+            "crank_position": crank_pos,
         }
 
     # ------------------------------------------------------------------
@@ -582,12 +657,11 @@ class SignalGenerator:
         """
         Apply declarative relationships with gain, lag, offset, and combine.
 
-        Combine semantics (B1):
+        Combine semantics:
             replace  → target = computed value
             additive → target = existing target + computed value
 
-        Resolution: multi-pass until no progress. Handles acyclic
-        dependency graphs automatically.
+        Resolution: multi-pass until no progress.
         """
         signals: dict[str, np.ndarray] = {}
         signals.update(driver)

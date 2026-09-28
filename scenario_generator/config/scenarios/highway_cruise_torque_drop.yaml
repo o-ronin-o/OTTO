@@ -1,0 +1,27 @@
+scenario:
+  name: "Highway Cruise with Intermittent Torque Drops"
+  duration_s: 90
+  base_rate_hz: 100
+  vehicle_id: suv_b
+
+  segments:
+    - {name: launch,    t_start: 0,  t_end: 3,  throttle_pct: 55, brake_pedal_pct: 0,  gear: 1}
+    - {name: shift_2,   t_start: 3,  t_end: 6,  throttle_pct: 55, brake_pedal_pct: 0,  gear: 2}
+    - {name: shift_3,   t_start: 6,  t_end: 11, throttle_pct: 50, brake_pedal_pct: 0,  gear: 3}
+    - {name: merge,     t_start: 11, t_end: 18, throttle_pct: 45, brake_pedal_pct: 0,  gear: 4}
+    - {name: cruise,    t_start: 18, t_end: 65, throttle_pct: 40, brake_pedal_pct: 0,  gear: 5}
+    - {name: exit_1,    t_start: 65, t_end: 72, throttle_pct: 0,  brake_pedal_pct: 15, gear: 4}
+    - {name: exit_2,    t_start: 72, t_end: 82, throttle_pct: 0,  brake_pedal_pct: 25, gear: 3}
+    - {name: stop,      t_start: 82, t_end: 90, throttle_pct: 0,  brake_pedal_pct: 40, gear: 1}
+
+  faults:
+    - id: misfire_train
+      type: crankshaft_torque_drop
+      onset: {anchor: segment_start, segment: cruise, offset_s: 10}
+      end:   {anchor: segment_end,   segment: cruise, offset_s: 0}
+      params:
+        drop_magnitude: 0.7
+        drop_duration_s: 0.15
+        drop_frequency_hz: 0.4
+        drop_progression: pulse
+        seed: 42

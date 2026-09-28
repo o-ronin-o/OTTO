@@ -1,0 +1,17 @@
+evolution:
+  name: "Crank Sensor Freeze Over 90 Days"
+  vehicle_id: suv_b
+  base_scenario: highway_cruise_crank_sensor_freeze
+  description: >
+    A 90-day trajectory showing a crank sensor progressively degrading
+    into longer freeze events. Severity maps to freeze_duration_s in
+    the fault registry, using a scaling factor (severity 1.0 → 30 s
+    freeze, the maximum parameter value).
+
+  recordings:
+    - {day: 1,  recording_id: day_01,  severity: 0.00, notes: "healthy sensor"}
+    - {day: 15, recording_id: day_15,  severity: 0.10, notes: "brief freeze (~3 s)"}
+    - {day: 30, recording_id: day_30,  severity: 0.25, notes: "~7 s freeze"}
+    - {day: 60, recording_id: day_60,  severity: 0.50, notes: "~15 s freeze"}
+    - {day: 90, recording_id: day_90,  severity: 0.85, notes: "~25 s freeze"}
+    - {day: 95, recording_id: day_95,  severity: 0.05, notes: "after sensor replacement"}

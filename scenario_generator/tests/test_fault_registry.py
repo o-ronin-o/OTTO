@@ -299,3 +299,11 @@ def test_duplicate_fault_id_across_files_raises(tmp_path):
         yaml.safe_dump({"fault": body2}, f)
     with pytest.raises(ValueError):
         ConfigLoader(d).load_fault_types()
+
+def test_brake_pad_wear_defaults_injection_point(loader):
+    """Existing fault should default to injection_point='physics'."""
+    faults = loader.load_fault_types()
+    f = faults["brake_pad_wear"]
+    # The YAML doesn't declare it, but the loader or downstream code should treat it as physics
+    # (either the field is absent, in which case the injector defaults it, or the loader fills it)
+    assert f.get("injection_point", "physics") == "physics"

@@ -1,0 +1,72 @@
+fault:
+  id: crankshaft_torque_drop
+  physical_category: mechanical
+  observable_effect: dropout
+  layer: signal
+  injection_point: physics
+  severity_maps_to: drop_magnitude
+
+  description: >
+    Brief, sharp, repeated losses of engine torque. During each drop,
+    the crankshaft decelerates momentarily (visible as an engine_rpm
+    dip) and recovers within a fraction of a second. Caused by
+    intermittent combustion failure, injector fault, or ECU torque
+    limiter.
+
+    The fault generates a train of drops across its window, spaced
+    drop_frequency_hz apart. Each drop lasts drop_duration_s and
+    reduces engine torque by drop_magnitude.
+
+  parameters:
+    - name: drop_magnitude
+      type: float
+      range: [0.0, 1.0]
+      description: >
+        Fraction of engine torque lost during each drop.
+        0.0 = no drop, 1.0 = full torque loss for the drop duration.
+
+    - name: drop_duration_s
+      type: float
+      range: [0.01, 2.0]
+      default: 0.15
+      description: >
+        Duration of a single drop, in seconds. Real torque drops last
+        10-500 ms.
+
+    - name: drop_frequency_hz
+      type: float
+      range: [0.05, 20.0]
+      default: 0.5
+      description: >
+        How often drops occur, in Hz. A value of 0.5 means one drop
+        every 2 seconds. A value of 5.0 means one drop every 200 ms.
+
+    - name: drop_progression
+      type: enum
+      values: [step, linear, pulse]
+      default: pulse
+      description: >
+        Shape of an individual drop:
+          step   = constant loss during the drop window
+          linear = linear ramp to drop_magnitude over the window
+          pulse  = instant drop, exponential recovery to 1.0
+
+    - name: seed
+      type: int
+      range: [0, 2147483647]
+      default: 42
+      description: >
+        Random seed for the drop phase offset. Ensures drops do not
+        all start at the same relative time when the recording
+        begins.
+
+  targets:
+    signals: [engine_rpm, crank_position]
+    messages: []
+
+  injection_rule: >
+    Build a per-timestep multiplier array. For each drop event
+    (spaced 1/drop_frequency_hz apart within the fault window), set
+    the multiplier to (1 - drop_magnitude) with the specified
+    progression. Between drops, the multiplier is 1.0. The physics
+    engine is re-run with this multiplier applied to engine torque.

@@ -39,3 +39,11 @@ A step is complete only when all four phases are checked.
 - [x] Phase 1: Design 
 - [x] Phase 2: Implemented
 - [x] Phase 3: Tests pass (163/163)
+
+## Step 2.5 — Evolution Timeline Builder
+- [x] Phase 1: Design 
+- [x] Phase 2: Implementation 
+- [x] Phase 3: Tests pass
+)
+
+Zero-severity faults are treated as non-faulty. A fault declaration with severity_start = severity_end = 0 produces a faults.csv row (for trajectory completeness) but does not set is_fault = 1 in the per-frame labels. The label reflects the fault's effect, not its scheduling window.

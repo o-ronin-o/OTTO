@@ -1,0 +1,54 @@
+fault:
+  id: crank_sensor_failure
+  physical_category: sensor
+  observable_effect: freeze
+  layer: signal
+  injection_point: post_physics
+  severity_maps_to: freeze_duration_s
+
+  description: >
+    The crank position sensor stops updating. The engine continues
+    to run normally and drives the vehicle as commanded, but the
+    reported engine_rpm and crank_position freeze at their values at
+    the moment of onset.
+
+    Cross-signal signature (what proves the engine is fine):
+      - throttle_position continues to command the driver's input
+      - longitudinal_acceleration continues to reflect engine torque
+      - vehicle_speed and wheel_speed continue to evolve normally
+      - Only engine_rpm and crank_position are frozen
+
+    This fault models a sensor-only failure with no physical
+    consequences on the vehicle's motion.
+
+    Deferred modes: drift, dropout, noise (registry enum can be
+    extended later; current implementation handles freeze only).
+
+  parameters:
+    - name: freeze_duration_s
+      type: float
+      range: [0.0, 60.0]
+      default: 10.0
+      description: >
+        How long the freeze lasts, in seconds. Clipped to the fault
+        window if it would extend past end_s.
+
+    - name: freeze_scope
+      type: enum
+      values: [per_signal, common]
+      default: per_signal
+      description: >
+        How to freeze the two affected signals:
+          per_signal = engine_rpm frozen at its own onset value,
+                       crank_position frozen at its own onset value
+          common     = both signals frozen at engine_rpm's onset value
+
+  targets:
+    signals: [engine_rpm, crank_position]
+    messages: []
+
+  injection_rule: >
+    After the physics engine has run, apply a mask to engine_rpm and
+    crank_position: for t in [onset_s, onset_s + freeze_duration_s),
+    replace the value with the value at onset_s. Other signals are
+    unaffected.

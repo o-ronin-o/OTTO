@@ -8,6 +8,7 @@ message_sets:
         - engine_rpm
         - throttle_position
         - coolant_temperature
+        - crank_position 
 
     brake_data:
       id: 0x1A0
@@ -35,6 +36,7 @@ message_sets:
         - engine_rpm
         - throttle_position
         - coolant_temperature
+        - crank_position 
 
     brake_data:
       id: 0x2B0

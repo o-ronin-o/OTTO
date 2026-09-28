@@ -1,0 +1,670 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Batch 2 — Engine-Side Faults + New Signal Design Discussion</title>
+  <style>
+    :root {
+      --primary: #1a3c5e;
+      --accent: #2e7d9b;
+      --bg: #f8fafc;
+      --border: #cbd5e1;
+      --header-bg: #1a3c5e;
+      --header-fg: #ffffff;
+      --zebra: #f1f5f9;
+      --box-bg: #eef4f9;
+      --highlight: #fff3cd;
+      --warn: #fef3c7;
+      --warn-border: #d97706;
+    }
+
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+
+    body {
+      font-family: 'Segoe UI', 'Helvetica Neue', Arial, sans-serif;
+      font-size: 11pt;
+      line-height: 1.6;
+      color: #1e293b;
+      background: #ffffff;
+      padding: 30px 40px;
+      max-width: 1100px;
+      margin: 0 auto;
+    }
+
+    h1 {
+      font-size: 19pt;
+      color: var(--primary);
+      border-bottom: 3px solid var(--accent);
+      padding-bottom: 10px;
+      margin-bottom: 6px;
+    }
+
+    h2 {
+      font-size: 14.5pt;
+      color: var(--primary);
+      margin-top: 34px;
+      margin-bottom: 10px;
+      padding-bottom: 4px;
+      border-bottom: 1.5px solid var(--border);
+    }
+
+    h3 {
+      font-size: 12pt;
+      color: var(--accent);
+      margin-top: 20px;
+      margin-bottom: 6px;
+    }
+
+    h4 {
+      font-size: 11pt;
+      color: var(--primary);
+      margin-top: 14px;
+      margin-bottom: 5px;
+    }
+
+    p { margin-bottom: 9px; text-align: justify; }
+
+    .subtitle {
+      font-size: 10.5pt;
+      color: #475569;
+      margin-bottom: 22px;
+      font-style: italic;
+    }
+
+    table {
+      width: 100%;
+      border-collapse: collapse;
+      margin: 14px 0 20px;
+      font-size: 9.5pt;
+    }
+
+    thead th {
+      background: var(--header-bg);
+      color: var(--header-fg);
+      font-weight: 600;
+      padding: 8px;
+      text-align: left;
+      border: 1px solid #0f2a3f;
+    }
+
+    tbody td {
+      padding: 7px 8px;
+      border: 1px solid var(--border);
+      vertical-align: top;
+    }
+
+    tbody tr:nth-child(even) { background: var(--zebra); }
+
+    ul, ol { margin: 6px 0 12px 22px; }
+    li { margin-bottom: 4px; }
+
+    code {
+      font-family: 'Consolas', 'Monaco', monospace;
+      background: #f1f5f9;
+      padding: 1px 5px;
+      border-radius: 3px;
+      font-size: 9.5pt;
+      color: #0f172a;
+    }
+
+    pre {
+      background: #0f172a;
+      color: #e2e8f0;
+      padding: 12px 16px;
+      border-radius: 6px;
+      overflow-x: auto;
+      font-size: 9pt;
+      line-height: 1.5;
+      margin: 10px 0 16px;
+    }
+
+    pre code {
+      background: none;
+      color: inherit;
+      padding: 0;
+    }
+
+    .box {
+      background: var(--box-bg);
+      border-left: 4px solid var(--accent);
+      padding: 13px 17px;
+      margin: 16px 0;
+      border-radius: 0 6px 6px 0;
+    }
+
+    .box strong { color: var(--primary); }
+
+    .warn {
+      background: var(--warn);
+      border-left: 4px solid var(--warn-border);
+      padding: 13px 17px;
+      margin: 16px 0;
+      border-radius: 0 6px 6px 0;
+    }
+
+    .warn strong { color: #92400e; }
+
+    .fault-card {
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      padding: 14px 18px;
+      margin: 14px 0;
+      background: #ffffff;
+    }
+
+    .fault-card h3 {
+      margin-top: 0;
+      color: var(--primary);
+      font-size: 11.5pt;
+    }
+
+    .fault-card .meta {
+      font-size: 9pt;
+      color: #64748b;
+      margin-bottom: 8px;
+    }
+
+    .fault-card .field {
+      display: flex;
+      margin-bottom: 4px;
+      font-size: 10pt;
+    }
+
+    .fault-card .field-label {
+      flex: 0 0 140px;
+      color: #64748b;
+      font-weight: 600;
+    }
+
+    .badge {
+      display: inline-block;
+      padding: 2px 9px;
+      border-radius: 12px;
+      font-size: 8pt;
+      font-weight: 600;
+      text-transform: uppercase;
+    }
+
+    .badge-mech { background: #fee2e2; color: #991b1b; }
+    .badge-elec { background: #fef3c7; color: #92400e; }
+    .badge-sens { background: #d1fae5; color: #065f46; }
+    .badge-drift { background: #dbeafe; color: #1e40af; }
+    .badge-drop { background: #ede9fe; color: #5b21b6; }
+
+    .q-card {
+      background: #f8fafc;
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      padding: 12px 16px;
+      margin: 12px 0;
+    }
+
+    .q-card h4 {
+      margin-top: 0;
+      color: var(--primary);
+    }
+
+    .q-card .recommend {
+      margin-top: 8px;
+      padding: 8px 12px;
+      background: #dcfce7;
+      border-left: 3px solid #16a34a;
+      border-radius: 0 4px 4px 0;
+      font-size: 10pt;
+    }
+
+    .q-card .recommend strong { color: #15803d; }
+
+    hr { border: none; border-top: 1px solid var(--border); margin: 28px 0; }
+
+    .footer {
+      font-size: 8.5pt;
+      color: #94a3b8;
+      text-align: center;
+      margin-top: 30px;
+    }
+
+    @media print {
+      body { padding: 12px 18px; font-size: 10pt; }
+      h1 { font-size: 16pt; }
+      h2 { font-size: 12.5pt; page-break-after: avoid; }
+      h3 { font-size: 11pt; page-break-after: avoid; }
+      .fault-card, .q-card, .box, .warn { page-break-inside: avoid; }
+    }
+  </style>
+</head>
+<body>
+
+  <h1>Batch 2 — Engine-Side Faults + New Signal Design</h1>
+  <p class="subtitle">
+    Design discussion for the second batch of fault types, plus an open question<br>
+    about adding a new signal before implementing these faults.
+  </p>
+
+  <!-- ==================== CONTEXT ==================== -->
+  <h2>1. Context — Where We Are</h2>
+
+  <p>The fault framework currently implements <strong>one fault type</strong>: <code>brake_pad_wear</code>.</p>
+
+  <p>Its characteristics:</p>
+
+  <table>
+    <thead>
+      <tr><th>Field</th><th>Value</th></tr>
+    </thead>
+    <tbody>
+      <tr><td>Physical category</td><td>mechanical</td></tr>
+      <tr><td>Observable effect</td><td>drift</td></tr>
+      <tr><td>Layer</td><td>signal</td></tr>
+      <tr><td>Target signal</td><td>longitudinal_acceleration</td></tr>
+      <tr><td>Physics input perturbed</td><td>brake_force_multiplier</td></tr>
+      <tr><td>Parameters</td><td>severity_start, severity_end, progression</td></tr>
+    </tbody>
+  </table>
+
+  <p>The infrastructure for adding more fault types is in place: registry, injector, labels, tests, and the evolution timeline builder. What remains is to <strong>expand the fault library</strong>.</p>
+
+  <div class="box">
+    <strong>The plan:</strong> add fault types in batches. Each batch targets a distinct region of the vehicle (engine, braking, steering, electrical). This document covers Batch 2 — engine-side faults.
+  </div>
+
+  <!-- ==================== OPEN QUESTION FIRST ==================== -->
+  <h2>2. Open Question — Add a New Signal First?</h2>
+
+  <div class="warn">
+    <strong>Before implementing Batch 2, consider adding a new signal to the pipeline.</strong><br>
+    A new signal could make these faults — and future ones — produce more interesting reflection in the observable data.
+  </div>
+
+  <p>The current 8 signals are:</p>
+
+  <pre><code>engine_rpm
+throttle_position
+coolant_temperature
+brake_pressure
+brake_pedal
+wheel_speed
+vehicle_speed
+longitudinal_acceleration</code></pre>
+
+  <p>These are all <strong>longitudinal</strong> signals — they describe the vehicle's forward motion and its engine/braking behavior. There is no lateral or rotational signal in the set.</p>
+
+  <h3>Candidate new signals</h3>
+
+  <p>Each candidate is evaluated on: (a) how much it enriches fault expression, (b) its cost to add, (c) whether it unlocks new fault types.</p>
+
+  <table>
+    <thead>
+      <tr>
+        <th>Signal</th>
+        <th>Unit</th>
+        <th>Unlocks fault types</th>
+        <th>Cost</th>
+      </tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td><code>steering_angle</code></td>
+        <td>deg</td>
+        <td>Power steering failure, steering sensor drift, steering lock</td>
+        <td>Moderate — needs scenario support (turns), a physics model for steering</td>
+      </tr>
+      <tr>
+        <td><code>lateral_acceleration</code></td>
+        <td>m/s²</td>
+        <td>Chassis/alignment faults, ESC-related faults</td>
+        <td>Moderate — derives from steering + speed</td>
+      </tr>
+      <tr>
+        <td><code>yaw_rate</code></td>
+        <td>deg/s</td>
+        <td>Yaw stability faults, vehicle spin detection</td>
+        <td>Moderate — derives from steering + speed</td>
+      </tr>
+      <tr>
+        <td><code>intake_air_temperature</code></td>
+        <td>celsius</td>
+        <td>Air intake faults, turbo/intercooler faults</td>
+        <td>Low — similar to coolant, warmup-style behavior</td>
+      </tr>
+      <tr>
+        <td><code>mass_air_flow</code></td>
+        <td>g/s</td>
+        <td>MAF sensor faults, throttle/intake leaks</td>
+        <td>Low — correlates with RPM × throttle</td>
+      </tr>
+      <tr>
+        <td><code>battery_voltage</code></td>
+        <td>V</td>
+        <td>Electrical faults, alternator faults, battery aging</td>
+        <td>Low — mostly constant, easy to model</td>
+      </tr>
+      <tr>
+        <td><code>fuel_trim_short</code></td>
+        <td>%</td>
+        <td>Fuel system faults, injector faults, O2 sensor faults</td>
+        <td>Low — correlates with throttle/RPM</td>
+      </tr>
+    </tbody>
+  </table>
+
+  <h3>Why this matters for Batch 2</h3>
+
+  <p>Batch 2's three faults target the engine. Their effects currently manifest as:</p>
+
+  <ul>
+    <li><code>throttle_sensor_gain_fault</code> — engine delivers more/less power than commanded</li>
+    <li><code>engine_misfire</code> — engine torque drops intermittently</li>
+    <li><code>coolant_sensor_drift</code> — coolant reading drifts from reality</li>
+  </ul>
+
+  <p>The first two affect the engine's <em>output</em>. Currently, the only way to observe that is via <code>engine_rpm</code> and <code>longitudinal_acceleration</code>. Both are already busy signals with their own dynamics.</p>
+
+  <div class="box">
+    <strong>The pitch:</strong> adding <code>mass_air_flow</code> (MAF) or <code>intake_air_temperature</code> (IAT) would give these engine faults <strong>a cleaner, more direct observable</strong>. A misfire shows up in MAF as a sharp dip. A throttle gain fault shows up in MAF as a scaled flow. And both signals are cheap to add.
+  </div>
+
+  <h3>Three options</h3>
+
+  <h4>Option A — Add no new signal now</h4>
+  <p>Implement Batch 2 with the existing 8 signals. Effects show up in <code>engine_rpm</code> and <code>longitudinal_acceleration</code>, as with <code>brake_pad_wear</code>. Simpler, faster.</p>
+
+  <h4>Option B — Add one signal first</h4>
+  <p>Before Batch 2, add a single new signal. My recommendation: <strong><code>mass_air_flow</code></strong>. It's the most direct observable of engine behavior after RPM, and it interacts meaningfully with the throttle gain fault and misfire.</p>
+
+  <h4>Option C — Add two signals</h4>
+  <p>Add <code>mass_air_flow</code> and <code>intake_air_temperature</code>. Gives the engine faults two independent observables.</p>
+
+  <div class="q-card">
+    <h4>Decision requested</h4>
+    <p>Which option do you prefer?</p>
+    <div class="recommend">
+      <strong>My recommendation: Option B.</strong> Add <code>mass_air_flow</code> first. It's a low-cost addition, it makes Batch 2's faults more diagnostically rich, and it unlocks future fault types (MAF sensor faults, intake leaks, turbo issues) that wouldn't otherwise be expressible.
+    </div>
+  </div>
+
+  <p><strong>If we add <code>mass_air_flow</code> first, the sequence becomes:</strong></p>
+
+  <ol>
+    <li>Design + add <code>mass_air_flow</code> signal (with a physics relationship to RPM and throttle)</li>
+    <li>Then proceed with Batch 2 as designed below</li>
+    <li>Update Batch 2's faults to also affect <code>mass_air_flow</code> where physically appropriate</li>
+  </ol>
+
+  <hr>
+
+  <!-- ==================== BATCH 2 FAULTS ==================== -->
+  <h2>3. Batch 2 — Engine-Side Faults</h2>
+
+  <p>Three faults covering sensor and mechanical categories, affecting the engine/powertrain:</p>
+
+  <!-- FAULT D -->
+  <div class="fault-card">
+    <h3>Fault D — throttle_sensor_gain_fault</h3>
+    <p class="meta">
+      <span class="badge badge-sens">sensor</span>
+      <span class="badge badge-drift">drift</span>
+    </p>
+
+    <div class="field"><span class="field-label">Physical story:</span><span>The throttle position sensor's signal is scaled by a gain error. The driver commands 50% throttle, but the ECU reads 60% (or 40%). The engine delivers torque based on the misread value.</span></div>
+
+    <div class="field"><span class="field-label">Pipeline behavior:</span><span><code>effective_throttle = throttle × (1 + gain_error(t))</code>, then <code>engine_torque = effective_throttle × max_torque</code>.</span></div>
+
+    <div class="field"><span class="field-label">Diagnostic signature:</span><span>Engine delivers more/less power than the pedal would predict. The throttle→acceleration relationship is broken.</span></div>
+
+    <div class="field"><span class="field-label">Target signals:</span><span><code>engine_rpm</code>, <code>longitudinal_acceleration</code> (cascade)</span></div>
+
+    <div class="field"><span class="field-label">Physics input:</span><span><code>throttle_multiplier</code> — a new array applied to throttle before engine torque calculation</span></div>
+
+    <div class="field"><span class="field-label">Parameters:</span><span><code>gain_error_final</code> (e.g., +0.3), <code>progression</code></span></div>
+  </div>
+
+  <!-- FAULT E -->
+  <div class="fault-card">
+    <h3>Fault E — engine_misfire</h3>
+    <p class="meta">
+      <span class="badge badge-mech">mechanical</span>
+      <span class="badge badge-drop">dropout (intermittent)</span>
+    </p>
+
+    <div class="field"><span class="field-label">Physical story:</span><span>One or more cylinders misfire intermittently. Engine torque drops to zero for brief intervals (10–50 ms) at irregular points.</span></div>
+
+    <div class="field"><span class="field-label">Pipeline behavior:</span><span><code>misfire_mask[i] ∈ {0, 1}</code>, then <code>f_engine = f_engine_clean × misfire_mask[i]</code>.</span></div>
+
+    <div class="field"><span class="field-label">Diagnostic signature:</span><span>Irregular, sharp dips in <code>engine_rpm</code> and <code>longitudinal_acceleration</code>. Transient, not sustained.</span></div>
+
+    <div class="field"><span class="field-label">Target signals:</span><span><code>engine_rpm</code>, <code>longitudinal_acceleration</code> (cascade)</span></div>
+
+    <div class="field"><span class="field-label">Physics input:</span><span><code>engine_force_multiplier</code> — a binary array applied to f_engine</span></div>
+
+    <div class="field"><span class="field-label">Parameters:</span><span><code>misfire_probability</code> (e.g., 0.15), <code>burst_length</code> (e.g., 3), <code>seed</code></span></div>
+  </div>
+
+  <!-- FAULT F -->
+  <div class="fault-card">
+    <h3>Fault F — coolant_sensor_drift</h3>
+    <p class="meta">
+      <span class="badge badge-sens">sensor</span>
+      <span class="badge badge-drift">drift</span>
+    </p>
+
+    <div class="field"><span class="field-label">Physical story:</span><span>The coolant temperature sensor ages or gets contaminated. Its reading drifts from the true temperature. The engine itself is physically fine.</span></div>
+
+    <div class="field"><span class="field-label">Pipeline behavior:</span><span><code>coolant_reading = coolant_true + offset(t)</code>, where <code>offset(t)</code> ramps from 0 to <code>max_offset</code>.</span></div>
+
+    <div class="field"><span class="field-label">Diagnostic signature:</span><span>Coolant reading departs from the expected warm-up curve. A pure sensor fault — no other signal is affected.</span></div>
+
+    <div class="field"><span class="field-label">Target signals:</span><span><code>coolant_temperature</code> only</span></div>
+
+    <div class="field"><span class="field-label">Physics input:</span><span><code>signal_offset</code> — a post-physics override dict</span></div>
+
+    <div class="field"><span class="field-label">Parameters:</span><span><code>max_offset</code> (e.g., +15°C), <code>progression</code></span></div>
+  </div>
+
+  <hr>
+
+  <!-- ==================== PHYSICS HOOKS ==================== -->
+  <h2>4. New Physics Inputs Required</h2>
+
+  <p>To express these three faults, the <code>SignalGenerator.generate(faults={...})</code> interface must accept three new parameters (in addition to the existing <code>brake_force_multiplier</code>):</p>
+
+  <table>
+    <thead>
+      <tr>
+        <th>Physics input</th>
+        <th>Type</th>
+        <th>Applied where</th>
+      </tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td><code>throttle_multiplier</code></td>
+        <td>array in [0, ~2]</td>
+        <td>multiplies <code>throttle[i]</code> in <code>_compute_dynamics</code></td>
+      </tr>
+      <tr>
+        <td><code>engine_force_multiplier</code></td>
+        <td>binary array {0, 1}</td>
+        <td>multiplies <code>f_engine</code> contribution</td>
+      </tr>
+      <tr>
+        <td><code>signal_offset</code></td>
+        <td>dict[signal_name, array]</td>
+        <td>adds to signals in Phase 3 (post-physics)</td>
+      </tr>
+    </tbody>
+  </table>
+
+  <p>Total after Batch 2: <strong>4 physics inputs</strong> (including existing <code>brake_force_multiplier</code>).</p>
+
+  <hr>
+
+  <!-- ==================== DESIGN QUESTIONS ==================== -->
+  <h2>5. Design Questions Requiring Approval</h2>
+
+  <!-- Q1 -->
+  <div class="q-card">
+    <h4>Q1 — Which fault first?</h4>
+    <p>The three faults can be implemented in any order. The sequence affects which machinery gets built first.</p>
+    <div class="recommend">
+      <strong>Recommendation:</strong> Coolant → throttle → misfire. Simplest physics hook first (<code>signal_offset</code>), then more complex (throttle multiplier), then the most complex (intermittent faults with randomness).
+    </div>
+  </div>
+
+  <!-- Q2 -->
+  <div class="q-card">
+    <h4>Q2 — Is throttle_sensor_gain_fault a gain fault or an offset fault?</h4>
+    <p>Gain = multiplicative scaling (scales with input). Offset = additive bias (constant).</p>
+    <div class="recommend">
+      <strong>Recommendation:</strong> Gain. The name says gain, and gain is more interesting (a bias would be a special case of the offset mechanism we already need for coolant).
+    </div>
+  </div>
+
+  <!-- Q3 -->
+  <div class="q-card">
+    <h4>Q3 — For engine_misfire, what exactly does "engine force" mean?</h4>
+    <p>The engine force is <code>f_engine = wheel_torque / wheel_radius</code>. Misfire reduces torque production.</p>
+    <div class="recommend">
+      <strong>Recommendation:</strong> Use <code>engine_force_multiplier</code> as the physics input, applied directly to <code>f_engine</code>. Same effect as scaling torque, simpler to reason about.
+    </div>
+  </div>
+
+  <!-- Q4 -->
+  <div class="q-card">
+    <h4>Q4 — How to handle randomness in engine_misfire?</h4>
+    <p>Misfire uses randomness to determine which timesteps misfire. Until now, the pipeline has been deterministic.</p>
+    <p><strong>Options:</strong></p>
+    <ul>
+      <li>Option A — Injector-level seed (fixed globally)</li>
+      <li>Option B — Fault-declared seed (each fault declares its own seed)</li>
+      <li>Option C — Per-scenario seed</li>
+      <li>Option D — Fixed deterministic pattern (non-random)</li>
+    </ul>
+    <div class="recommend">
+      <strong>Recommendation:</strong> Option B. The fault declaration carries a seed. Reproducible, per-fault controllable, no hidden state.
+    </div>
+  </div>
+
+  <!-- Q5 -->
+  <div class="q-card">
+    <h4>Q5 — Misfire mask: per-timestep or per-burst?</h4>
+    <p>Real misfires happen in bursts (a few cycles), not independent single-frame events.</p>
+    <p><strong>Options:</strong></p>
+    <ul>
+      <li>Option A — Independent per-timestep (Bernoulli at each frame)</li>
+      <li>Option B — Burst mode (runs of several misfires)</li>
+    </ul>
+    <div class="recommend">
+      <strong>Recommendation:</strong> Option B. Realistic dips, more distinctive signature, but slightly more code.
+    </div>
+  </div>
+
+  <!-- Q6 -->
+  <div class="q-card">
+    <h4>Q6 — Coolant sensor drift: additive or multiplicative?</h4>
+    <p>Coolant temperature starts at ~20°C and approaches ~90°C. A drift could be additive (+15°C) or multiplicative (×1.2).</p>
+    <div class="recommend">
+      <strong>Recommendation:</strong> Additive. Physically natural for temperature sensors. Multiplicative doesn't make sense across the full range.
+    </div>
+  </div>
+
+  <!-- Q7 -->
+  <div class="q-card">
+    <h4>Q7 — Should we add an <code>injection_point</code> field to the fault registry?</h4>
+    <p>Sensor faults (coolant drift) should apply <em>after</em> all physics and relationships. Physical faults (brake pad wear) apply <em>during</em> physics. The distinction matters for how downstream signals see the effect.</p>
+    <p><strong>Options:</strong></p>
+    <ul>
+      <li>Option A — Rely on the existing <code>layer</code> field (signal vs. frame) to imply injection point</li>
+      <li>Option B — Add a new field <code>injection_point: physics | post_physics</code></li>
+    </ul>
+    <div class="recommend">
+      <strong>Recommendation:</strong> Option B. The <code>layer</code> field describes whether the fault operates on signals or frames. <code>injection_point</code> describes <em>when</em> in the physics pipeline it applies. These are orthogonal.
+    </div>
+  </div>
+
+  <!-- Q8 -->
+  <div class="q-card">
+    <h4>Q8 — Composition rules for overlapping faults?</h4>
+    <p>If two faults of the same type target the same signal or physics input, how do they compose?</p>
+    <p><strong>Proposed rules per fault family:</strong></p>
+    <ul>
+      <li>Gain faults — multiply: <code>(1+ε₁)·(1+ε₂)</code></li>
+      <li>Mask-based faults — union: <code>mask₁ | mask₂</code></li>
+      <li>Offset faults — add: <code>offset₁ + offset₂</code></li>
+    </ul>
+    <div class="recommend">
+      <strong>Recommendation:</strong> Adopt these family-specific composition rules. Each fault's registry entry declares a <code>composition_rule</code> field.
+    </div>
+  </div>
+
+  <hr>
+
+  <!-- ==================== ORDERING ==================== -->
+  <h2>6. Proposed Implementation Order</h2>
+
+  <p>The recommended sequence, conditioned on the decision in Section 2:</p>
+
+  <h3>If we add <code>mass_air_flow</code> first (recommended)</h3>
+  <ol>
+    <li><strong>Add <code>mass_air_flow</code> signal</strong> — registry, relationship, CAN mapping, tests</li>
+    <li><strong>Coolant sensor drift</strong> — the simplest fault to build (signal_offset hook)</li>
+    <li><strong>Throttle sensor gain fault</strong> — introduces throttle_multiplier hook</li>
+    <li><strong>Engine misfire</strong> — introduces randomness and mask-based composition</li>
+  </ol>
+
+  <h3>If we do not add a new signal</h3>
+  <ol>
+    <li><strong>Coolant sensor drift</strong></li>
+    <li><strong>Throttle sensor gain fault</strong></li>
+    <li><strong>Engine misfire</strong></li>
+  </ol>
+
+  <hr>
+
+  <!-- ==================== WHAT GETS DELIVERED ==================== -->
+  <h2>7. What Each Fault Type Will Deliver</h2>
+
+  <p>For each fault, following the same pattern established with <code>brake_pad_wear</code>:</p>
+
+  <ol>
+    <li><strong>Registry YAML</strong> — <code>config/faults/&lt;fault_id&gt;.yaml</code></li>
+    <li><strong>Physics hook</strong> — one new parameter on <code>SignalGenerator.generate(faults={...})</code></li>
+    <li><strong>Injector handler</strong> — a small function in <code>fault_injector.py</code></li>
+    <li><strong>Tests</strong> — validation, injection, labels, physical plausibility (~8–12 tests)</li>
+    <li><strong>Seed scenario</strong> — a scenario demonstrating the fault</li>
+    <li><strong>Notebook cells</strong> — for the fault validation notebook</li>
+  </ol>
+
+  <hr>
+
+  <!-- ==================== CONFIRMATION ==================== -->
+  <h2>8. What Needs Approval Before Proceeding</h2>
+
+  <table>
+    <thead>
+      <tr><th>Decision</th><th>Recommended answer</th></tr>
+    </thead>
+    <tbody>
+      <tr><td><strong>Section 2 — Add a new signal first?</strong></td><td>Yes — add <code>mass_air_flow</code></td></tr>
+      <tr><td>Q1 — Which fault first?</td><td>Coolant → throttle → misfire</td></tr>
+      <tr><td>Q2 — Throttle fault type</td><td>Gain</td></tr>
+      <tr><td>Q3 — Engine force semantics</td><td>Multiply f_engine by mask</td></tr>
+      <tr><td>Q4 — Randomness handling</td><td>Per-fault seed</td></tr>
+      <tr><td>Q5 — Misfire pattern</td><td>Burst mode</td></tr>
+      <tr><td>Q6 — Coolant drift form</td><td>Additive</td></tr>
+      <tr><td>Q7 — Injection point field</td><td>Add <code>injection_point</code></td></tr>
+      <tr><td>Q8 — Overlap composition</td><td>Per-family rules</td></tr>
+    </tbody>
+  </table>
+
+  <p>Once approved, implementation begins with the first item in Section 6.</p>
+
+  <hr>
+  <p class="footer">
+    Batch 2 Design Document — Engine-Side Faults + New Signal Decision.<br>
+    Companion to <code>docs/project_status.md</code> and <code>docs/fault_catalog.html</code>.
+  </p>
+
+</body>
+</html>

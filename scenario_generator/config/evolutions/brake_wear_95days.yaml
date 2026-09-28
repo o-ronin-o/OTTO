@@ -1,0 +1,19 @@
+evolution:
+  name: "Brake Wear Over 95 Days with Tampering"
+  vehicle_id: suv_b
+  base_scenario: highway_brake_wear_gradual
+  description: >
+    A 95-day simulated vehicle lifecycle showing gradual brake pad wear,
+    a sudden tampering event at day 91, and post-repair recovery.
+
+  recordings:
+    - {day: 1,  recording_id: day_01,  severity: 0.00, notes: "baseline"}
+    - {day: 15, recording_id: day_15,  severity: 0.05}
+    - {day: 30, recording_id: day_30,  severity: 0.10}
+    - {day: 60, recording_id: day_60,  severity: 0.20}
+    - {day: 90, recording_id: day_90,  severity: 0.35}
+    - {day: 91, recording_id: day_91,  severity: 0.60,
+       onset_s: 45, end_s: 90, progression: step,
+       notes: "tampering event mid-drive"}
+    - {day: 95, recording_id: day_95,  severity: 0.05,
+       notes: "post-service"}

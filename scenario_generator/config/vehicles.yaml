@@ -14,6 +14,12 @@ vehicles:
     wheel_radius_m: 0.31
     drivetrain_efficiency: 0.90
     idle_rpm: 800
+    # --- Crankshaft dynamics (Step 2.6 / Phase A) ---
+    moment_of_inertia_kg_m2: 0.20       # rotating assembly inertia
+    engine_friction_coeff: 0.005        # Nm·s/rad, internal losses
+    clutch_slip_drag_coeff: 0.02        # Nm·s/rad, torque on slipping clutch
+    idle_throttle_pct: 5.0   
+    redline_rpm: 6500                   # rev limiter threshold           # minimum throttle command at idle
     can_mapping:
       engine_rpm:
         id: 0x100
@@ -63,6 +69,12 @@ vehicles:
         length: 2
         scale: 0.01
         offset: -10
+      crank_position:
+        id: 0x100
+        start_byte: 4
+        length: 2
+        scale: 0.1
+        offset: 0
 
   suv_b:
     name: "Generic SUV B"
@@ -79,6 +91,12 @@ vehicles:
     wheel_radius_m: 0.35
     drivetrain_efficiency: 0.90
     idle_rpm: 800
+    # --- Crankshaft dynamics (Step 2.6 / Phase A) ---
+    moment_of_inertia_kg_m2: 0.35        # rotating assembly inertia
+    engine_friction_coeff: 0.005        # Nm·s/rad, internal losses
+    clutch_slip_drag_coeff: 0.02        # Nm·s/rad, torque on slipping clutch
+    idle_throttle_pct: 5.0              # minimum throttle command at idle
+    redline_rpm: 6500                   # rev limiter threshold
     can_mapping:
       engine_rpm:
         id: 0x200
@@ -128,3 +146,9 @@ vehicles:
         length: 2
         scale: 0.01
         offset: -10
+      crank_position:
+        id: 0x200
+        start_byte: 4
+        length: 2
+        scale: 0.1
+        offset: 0

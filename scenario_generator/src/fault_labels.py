@@ -85,6 +85,7 @@ class FaultLabelBuilder:
                 "fault_type": a.fault_type,
                 "onset_s": a.onset_s,
                 "end_s": a.end_s,
+                "severity": a.severity,          # ← NEW
                 "severity_start": a.severity_start,
                 "severity_end": a.severity_end,
                 "progression": a.progression,
@@ -116,11 +117,16 @@ class FaultLabelBuilder:
             t_s = frame.timestamp_ms / 1000.0
 
             # Active faults at this timestamp
-            active = [
-                (f, _compute_severity_at_from_applied(f, t_s))
-                for f in applied_faults
-                if f.onset_s <= t_s < f.end_s
-            ]
+                        # A fault is "active" at time t if its window covers t AND it
+            # has a non-zero effect. Zero-severity faults are treated as
+            # non-faulty (physically indistinguishable from healthy).
+            active = []
+            for f in applied_faults:
+                if not (f.onset_s <= t_s < f.end_s):
+                    continue
+                sev = _compute_severity_at_from_applied(f, t_s)
+                if sev > 1e-9:
+                    active.append((f, sev))
 
             if not active:
                 rows.append({
@@ -169,21 +175,11 @@ def _compute_severity_at_from_applied(
     t_s: float,
 ) -> float:
     """
-    Scalar severity for an AppliedFault record.
+    Scalar severity for an AppliedFault at time t.
 
-    AppliedFault carries the same params as the source ResolvedFault,
-    but in flattened form. We reconstruct the same formula.
+    Uses the normalized `severity` field, so all fault families are
+    handled consistently (brake wear, torque drop, sensor freeze).
     """
-   
     if not (fault.onset_s <= t_s < fault.end_s):
         return 0.0
-
-    progress = _progression_value(
-        fault.progression,
-        np.array([t_s]),
-        fault.onset_s,
-        fault.end_s,
-    )[0]
-    s_start = fault.severity_start
-    s_end = fault.severity_end
-    return s_start + (s_end - s_start) * progress
+    return fault.severity

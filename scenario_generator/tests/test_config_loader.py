@@ -252,6 +252,18 @@ def test_invalid_config_dir_raises():
         ConfigLoader("/path/that/does/not/exist")
 
 
+def test_vehicles_have_crankshaft_params(loader):
+    """Each vehicle must declare crankshaft dynamics parameters."""
+    vehicles = loader.load_vehicles()
+    required = [
+        "moment_of_inertia_kg_m2",
+        "engine_friction_coeff",
+        "clutch_slip_drag_coeff",
+        "idle_throttle_pct",
+    ]
+    for vid, vdef in vehicles.items():
+        for field in required:
+            assert field in vdef, f"Vehicle '{vid}' missing '{field}'"
 # ----------------------------------------------------------------------
 # Acceptance test (mirrors the spec)
 # ----------------------------------------------------------------------
@@ -260,3 +272,9 @@ def test_validate_all_includes_scenarios(loader):
     """validate_all() runs both config and scenario validation."""
     errors = loader.validate_all()
     assert errors == [], f"Expected no errors, got: {errors}"
+
+def test_signals_include_crank_position(loader):
+    signals = loader.load_signals()
+    assert "crank_position" in signals
+    assert signals["crank_position"]["unit"] == "degrees"
+    assert signals["crank_position"]["range"] == [0, 360]

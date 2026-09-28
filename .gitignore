@@ -1,0 +1,110 @@
+# ==================================================
+# .gitignore — Synthetic CAN Data Generation Project
+# ==================================================
+#
+# Guiding principle: config, code, tests, and notebooks are tracked.
+# Generated data (large CSVs, manifests) is NOT tracked — regenerable
+# from configs via `python -m scripts.build_all_data`.
+
+# ---------- Generated data (regenerable from configs) ----------
+data/
+data_test/
+*.frames.csv
+*.signals.csv
+*.faults.csv
+*.labels.csv
+manifest.csv
+metadata.json
+
+# The data directory may contain .gitkeep or README, but no generated CSVs
+!data/.gitkeep
+!data/README.md
+
+# ---------- Python ----------
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+share/python-wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+MANIFEST
+
+# ---------- Virtual environments ----------
+.venv/
+venv/
+ENV/
+env/
+.python-version
+
+# ---------- Jupyter ----------
+.ipynb_checkpoints/
+*.ipynb_checkpoints/
+
+# ---------- Test / coverage ----------
+.pytest_cache/
+.coverage
+.coverage.*
+htmlcov/
+.tox/
+.nox/
+.hypothesis/
+*.cover
+
+# ---------- IDE / editor ----------
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# ---------- OS ----------
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+Thumbs.db
+ehthumbs.db
+Desktop.ini
+
+# ---------- Logs / temp ----------
+*.log
+*.tmp
+*.bak
+*.orig
+
+# ---------- Local experiment outputs ----------
+runs/
+checkpoints/
+outputs/
+*.pkl
+*.h5
+*.hdf5
+*.parquet
+
+# ---------- Credentials / secrets (just in case) ----------
+.env
+.env.local
+*.pem
+*.key
+
+# ---------- Build artifacts ----------
+*.tar.gz
+*.zip
+# Keep source archives that are intentionally tracked
+!docs/*.zip

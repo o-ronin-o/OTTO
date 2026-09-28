@@ -1,0 +1,17 @@
+evolution:
+  name: "Intermittent Torque Drops Over 90 Days"
+  vehicle_id: suv_b
+  base_scenario: highway_cruise_torque_drop
+  description: >
+    A 90-day trajectory showing intermittent torque drops with
+    gradually increasing severity. Severity maps to drop_magnitude
+    in the fault registry. Drop frequency and duration stay constant
+    across the trajectory.
+
+  recordings:
+    - {day: 1,  recording_id: day_01,  severity: 0.00, notes: "baseline, no drops"}
+    - {day: 15, recording_id: day_15,  severity: 0.30, notes: "occasional drops"}
+    - {day: 30, recording_id: day_30,  severity: 0.45}
+    - {day: 60, recording_id: day_60,  severity: 0.60}
+    - {day: 90, recording_id: day_90,  severity: 0.75, notes: "frequent, severe drops"}
+    - {day: 95, recording_id: day_95,  severity: 0.20, notes: "after repair"}

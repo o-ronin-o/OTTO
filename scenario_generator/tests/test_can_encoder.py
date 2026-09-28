@@ -46,13 +46,13 @@ def sample_signals() -> dict:
         "engine_rpm": 2500.0,
         "throttle_position": 35.0,
         "coolant_temperature": 80.0,
+        "crank_position": 180.0,          # ← NEW (degrees, in [0, 360))
         "brake_pressure": 20.0,
         "brake_pedal": 10.0,
         "wheel_speed": 50.0,
         "vehicle_speed": 50.0,
         "longitudinal_acceleration": -1.5,
     }
-
 
 # ----------------------------------------------------------------------
 # Initialization
@@ -75,12 +75,11 @@ def test_mapped_signals_match_config(encoder_sedan):
     mapped = set(encoder_sedan.mapped_signal_names())
     expected = {
         "engine_rpm", "throttle_position", "coolant_temperature",
+        "crank_position",
         "brake_pressure", "brake_pedal", "wheel_speed",
         "vehicle_speed", "longitudinal_acceleration",
     }
     assert mapped == expected
-
-
 # ----------------------------------------------------------------------
 # Basic encoding
 # ----------------------------------------------------------------------
@@ -163,20 +162,19 @@ def test_round_trip_suv(encoder_suv, sample_signals):
 def test_encode_zero_values(encoder_sedan):
     zeros = {
         "engine_rpm": 0, "throttle_position": 0, "coolant_temperature": -40,
+        "crank_position": 0,
         "brake_pressure": 0, "brake_pedal": 0, "wheel_speed": 0,
         "vehicle_speed": 0, "longitudinal_acceleration": -10,
     }
     frames = encoder_sedan.encode(zeros)
-    # All payloads should be 8 bytes
     for payload in frames.values():
         assert len(payload) == 8
-    # Speed bytes should be zero (raw = 0)
     assert frames[0x120][0:2] == b"\x00\x00"
-
 
 def test_encode_max_values(encoder_sedan):
     maxed = {
         "engine_rpm": 8000, "throttle_position": 100, "coolant_temperature": 150,
+        "crank_position": 359.9,
         "brake_pressure": 200, "brake_pedal": 100, "wheel_speed": 250,
         "vehicle_speed": 250, "longitudinal_acceleration": 5,
     }
@@ -186,23 +184,20 @@ def test_encode_max_values(encoder_sedan):
 
 
 def test_out_of_range_is_clamped(encoder_sedan):
-    """Values beyond declared range are clamped, not raised."""
     extreme = {
-        "engine_rpm": 99999,           # above max
-        "throttle_position": -50,      # below min
-        "coolant_temperature": 500,    # above max
+        "engine_rpm": 99999,
+        "throttle_position": -50,
+        "coolant_temperature": 500,
+        "crank_position": 999.0,
         "brake_pressure": 0,
         "brake_pedal": 0,
         "wheel_speed": 0,
         "vehicle_speed": 0,
         "longitudinal_acceleration": 0,
     }
-    frames = encoder_sedan.encode(extreme)   # Should not raise
-    # Clamping: RPM at max 8000 → raw = 32000 = 0x7D00
+    frames = encoder_sedan.encode(extreme)
     assert frames[0x100][0:2] == (32000).to_bytes(2, "big")
-    # Throttle at min 0 → raw = 0
     assert frames[0x100][2] == 0
-
 
 # ----------------------------------------------------------------------
 # Error handling
@@ -247,23 +242,24 @@ def test_encode_dataframe_ignores_extra_columns(encoder_sedan, sample_signals):
 # ----------------------------------------------------------------------
 
 def test_dataframe_round_trip(encoder_sedan):
-    """Encode a DataFrame, then decode back and compare."""
     df = pd.DataFrame([
         {
             "engine_rpm": 1200.0, "throttle_position": 10.0,
             "coolant_temperature": 25.0,
+            "crank_position": 45.0,
             "brake_pressure": 0.0, "brake_pedal": 0.0, "wheel_speed": 5.0,
             "vehicle_speed": 5.0, "longitudinal_acceleration": 0.5,
         },
         {
             "engine_rpm": 3500.0, "throttle_position": 60.0,
             "coolant_temperature": 70.0,
+            "crank_position": 180.0,
             "brake_pressure": 50.0, "brake_pedal": 25.0, "wheel_speed": 80.0,
             "vehicle_speed": 80.0, "longitudinal_acceleration": -2.0,
         },
     ])
     frames_list = encoder_sedan.encode_dataframe(df)
-
+    
     # Decode each frame back
     for i, frames in enumerate(frames_list):
         decoded = {}
@@ -277,3 +273,11 @@ def test_dataframe_round_trip(encoder_sedan):
             assert abs(recovered - original) <= scale / 2 + 1e-9, (
                 f"Row {i}, signal {sig}: {original} → {recovered}"
             )
+
+def test_encode_crank_position_hand_computed(encoder_sedan, sample_signals):
+    """crank_position = 180°, scale = 0.1 → raw = 1800 = 0x0708"""
+    signals = dict(sample_signals)
+    signals["crank_position"] = 180.0
+    frames = encoder_sedan.encode(signals)
+    payload = frames[0x100]
+    assert payload[4:6] == bytes([0x07, 0x08])

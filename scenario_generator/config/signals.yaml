@@ -54,3 +54,15 @@ signals:
     resolution: 0.01
     description: "Vehicle longitudinal acceleration"
     system: dynamics
+  
+  crank_position:
+    unit: degrees
+    range: [0, 360]
+    resolution: 0.1
+    description: >
+      Crankshaft reference angle. Sampled at CAN rate (100 Hz), so at
+      typical engine speeds the raw signal appears aliased. Represents
+      the crankshaft rotation accumulated between CAN frames, wrapped
+      at 360 degrees. Used by crank-sensor fault detection; not a
+      physically faithful raw pulse-train signal.
+    system: powertrain

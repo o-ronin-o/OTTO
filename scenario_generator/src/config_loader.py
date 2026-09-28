@@ -38,6 +38,15 @@ VEHICLE_REQUIRED_FIELDS = ["name", "message_set", "mass_kg", "can_mapping"]
 MESSAGE_REQUIRED_FIELDS = ["id", "cycle_ms", "dlc", "signals"]
 CAN_MAPPING_REQUIRED_FIELDS = ["id", "start_byte", "length", "scale", "offset"]
 
+# Required fields for each fault definition
+FAULT_REQUIRED_FIELDS = [
+    "id", "physical_category", "observable_effect", "layer",
+    "description", "parameters", "targets", "injection_rule",
+]
+
+# Evolution constants (Step 2.5)
+EVOLUTION_REQUIRED_FIELDS = ["name", "vehicle_id", "base_scenario", "recordings"]
+RECORDING_REQUIRED_FIELDS = ["day", "severity"]
 # Valid relationship types
 VALID_RELATIONSHIP_TYPES = ["positive", "negative", "integral", "warmup"]
 
@@ -63,10 +72,11 @@ VALID_PROGRESSION_VALUES = [
     "constant", "linear", "exponential", "step", "oscillating",
 ]
 
-FAULT_REQUIRED_FIELDS = [
-    "id", "physical_category", "observable_effect", "layer",
-    "description", "parameters", "targets", "injection_rule",
-]
+FAULT_OPTIONAL_FIELDS = ["injection_point", "severity_maps_to"]
+
+VALID_INJECTION_POINTS = ["physics", "post_physics"]
+DEFAULT_INJECTION_POINT = "physics"
+DEFAULT_SEVERITY_MAPS_TO = "severity_end"
 
 # Maximum allowed target signals per fault (sanity guard)
 MAX_TARGET_SIGNALS = 5
@@ -222,6 +232,139 @@ class ConfigLoader:
             "fault_types": self.load_fault_types(),
         }
 
+    def load_evolution(self, evolution_path: str | Path) -> dict:
+        """
+        Load and validate a single evolution YAML file.
+
+        Returns the parsed `evolution` mapping. Raises ValueError on
+        schema violations.
+        """
+        path = Path(evolution_path)
+        if not path.exists():
+            raise FileNotFoundError(f"Evolution file not found: {path}")
+
+        with open(path, "r", encoding="utf-8") as f:
+            raw = yaml.safe_load(f)
+
+        if not isinstance(raw, dict) or "evolution" not in raw:
+            raise ValueError(f"{path.name}: missing top-level 'evolution' key")
+
+        evo = raw["evolution"]
+        if not isinstance(evo, dict):
+            raise ValueError(f"{path.name}: 'evolution' must be a mapping")
+
+        for field in EVOLUTION_REQUIRED_FIELDS:
+            if field not in evo:
+                raise ValueError(f"{path.name}: missing required field '{field}'")
+
+        # Validate vehicle
+        vehicles = self.load_vehicles()
+        if evo["vehicle_id"] not in vehicles:
+            raise ValueError(
+                f"{path.name}: unknown vehicle_id '{evo['vehicle_id']}'. "
+                f"Available: {sorted(vehicles.keys())}"
+            )
+
+        # Validate base scenario exists and declares at least one fault
+        scenarios_dir = self.config_dir / "scenarios"
+        base_scenario_path = scenarios_dir / f"{evo['base_scenario']}.yaml"
+        if not base_scenario_path.exists():
+            raise ValueError(
+                f"{path.name}: base_scenario '{evo['base_scenario']}' not found "
+                f"at {base_scenario_path}"
+            )
+
+        fault_registry = self.load_fault_types()
+        try:
+            from src.signal_generator import Scenario
+            base = Scenario.from_yaml(base_scenario_path, fault_registry=fault_registry)
+        except (ValueError, FileNotFoundError) as exc:
+            raise ValueError(
+                f"{path.name}: failed to load base_scenario "
+                f"'{evo['base_scenario']}': {exc}"
+            ) from exc
+
+        if not base.resolved_faults:
+            raise ValueError(
+                f"{path.name}: base_scenario '{evo['base_scenario']}' "
+                f"does not declare any faults"
+            )
+
+        base_fault_type = base.resolved_faults[0].type
+
+        # Validate recordings
+        recordings = evo["recordings"]
+        if not isinstance(recordings, list) or not recordings:
+            raise ValueError(f"{path.name}: 'recordings' must be a non-empty list")
+
+        seen_ids: set[str] = set()
+        seen_days: list[int] = []
+
+        for i, rec in enumerate(recordings):
+            ctx = f"{path.name} recording #{i}"
+
+            if not isinstance(rec, dict):
+                raise ValueError(f"{ctx}: must be a mapping")
+
+            for field in RECORDING_REQUIRED_FIELDS:
+                if field not in rec:
+                    raise ValueError(f"{ctx}: missing '{field}'")
+
+            # day
+            day = rec["day"]
+            if not isinstance(day, int) or day < 0:
+                raise ValueError(f"{ctx}: 'day' must be a non-negative integer")
+            seen_days.append(day)
+
+            # recording_id
+            rid = rec.get("recording_id", f"day_{day:02d}")
+            if not isinstance(rid, str) or not rid:
+                raise ValueError(f"{ctx}: 'recording_id' must be a non-empty string")
+            if rid in seen_ids:
+                raise ValueError(f"{ctx}: duplicate recording_id '{rid}'")
+            seen_ids.add(rid)
+
+            # severity
+            sev = rec["severity"]
+            if not isinstance(sev, (int, float)) or isinstance(sev, bool):
+                raise ValueError(f"{ctx}: 'severity' must be a number")
+            if not (0.0 <= sev <= 1.0):
+                raise ValueError(f"{ctx}: severity must be in [0, 1], got {sev}")
+
+            # progression (optional)
+            if "progression" in rec:
+                if not isinstance(rec["progression"], str):
+                    raise ValueError(
+                        f"{ctx}: 'progression' must be a string"
+                    )
+
+            # onset_s / end_s (optional)
+            onset = rec.get("onset_s", None)
+            end = rec.get("end_s", None)
+            if (onset is None) != (end is None):
+                raise ValueError(
+                    f"{ctx}: 'onset_s' and 'end_s' must be provided together"
+                )
+            if onset is not None:
+                if onset < 0 or onset >= base.duration_s:
+                    raise ValueError(
+                        f"{ctx}: onset_s={onset} out of [0, {base.duration_s})"
+                    )
+                if end <= onset or end > base.duration_s:
+                    raise ValueError(
+                        f"{ctx}: end_s={end} out of ({onset}, {base.duration_s}]"
+                    )
+
+        # Days must be strictly increasing
+        for i in range(1, len(seen_days)):
+            if seen_days[i] <= seen_days[i - 1]:
+                raise ValueError(
+                    f"{path.name}: recording days must be strictly increasing "
+                    f"(day {seen_days[i]} comes after day {seen_days[i-1]})"
+                )
+
+        return evo
+
     # ------------------------------------------------------------------
     # Validation
     # ------------------------------------------------------------------
@@ -374,7 +517,7 @@ class ConfigLoader:
         signal_names: set[str],
         vehicles: dict[str, dict],
     ) -> list[str]:
-        """Run validation rules F1–F7 on each fault definition."""
+        """Run validation rules F1–F11 on each fault definition."""
         errors: list[str] = []
 
         # All CAN IDs known across all vehicles
@@ -519,8 +662,28 @@ class ConfigLoader:
                                     f"'{v}'. Valid: {VALID_PROGRESSION_VALUES}"
                                 )
 
+            # F10 — valid injection_point
+            if "injection_point" in fdef:
+                if fdef["injection_point"] not in VALID_INJECTION_POINTS:
+                    errors.append(
+                        f"{prefix} invalid injection_point "
+                        f"'{fdef['injection_point']}'. "
+                        f"Valid: {VALID_INJECTION_POINTS}"
+                    )
+
+            # F11 — severity_maps_to references a declared parameter
+            if "severity_maps_to" in fdef:
+                declared_param_names = {p["name"] for p in params if isinstance(p, dict)}
+                if fdef["severity_maps_to"] not in declared_param_names:
+                    errors.append(
+                        f"{prefix} severity_maps_to='{fdef['severity_maps_to']}' "
+                        f"is not a declared parameter. "
+                        f"Declared: {sorted(declared_param_names)}"
+                    )
+
         return errors
-        # ------------------------------------------------------------------
+
+    # ------------------------------------------------------------------
     # Scenario validation (Stage 2)
     # ------------------------------------------------------------------
 
@@ -530,7 +693,6 @@ class ConfigLoader:
 
         Returns a list of error strings (empty if valid).
         """
-        # Avoid a circular import: import at call time
         from src.signal_generator import Scenario
 
         errors: list[str] = []
@@ -561,10 +723,24 @@ class ConfigLoader:
             errors.extend(self.validate_scenario(path))
         return errors
 
+    def validate_all_evolutions(self) -> list[str]:
+        """Validate every evolution YAML under config/evolutions/."""
+        evolutions_dir = self.config_dir / "evolutions"
+        if not evolutions_dir.is_dir():
+            return []
+        errors: list[str] = []
+        for path in sorted(evolutions_dir.glob("*.yaml")):
+            try:
+                self.load_evolution(path)
+            except (ValueError, FileNotFoundError) as exc:
+                errors.append(str(exc))
+        return errors
+
     def validate_all(self) -> list[str]:
         """Run all config validation, including scenario validation."""
         errors = self.validate()
         errors.extend(self.validate_all_scenarios())
+        errors.extend(self.validate_all_evolutions())
         return errors
 
 
