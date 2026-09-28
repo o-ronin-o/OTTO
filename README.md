@@ -1,8 +1,9 @@
 # Synthetic CAN Data Generation & Fault Injection Framework
 ## Project Status — Stages 1 & 2
 
-**Last updated:** 2025-09-27
-**Status:** Stage 1 complete, Stage 2 (fault injection) mostly complete, ML baseline reveals limitation
+**Last updated:** 2025-09-28
+**Status:** Stage 1 complete, Stage 2 (fault injection) complete through Phase B.
+**Fault types implemented:** 3 (brake_pad_wear, crankshaft_torque_drop, crank_sensor_failure)
 
 ---
 
@@ -10,15 +11,21 @@
 
 This document records the state of the project through:
 - **Stage 1** — Complete synthetic CAN data generation pipeline
-- **Stage 2** — Fault injection, labeling, and initial ML validation
+- **Stage 2** — Fault injection, labeling, and evolution timelines
+  - Step 2.0–2.2: fault registry, scenario schema, injector, labels
+  - Step 2.5: evolution timeline builder
+  - Phase A: kinematic engine model + `crank_position` signal
+  - Phase B: crank-related faults
 
-The framework produces physically-grounded multivariate time series from declarative
-scenario specifications, injects controlled faults via re-simulation of the physics
-engine, and emits per-frame labels suitable for downstream ML training.
+The framework produces physically-grounded multivariate time series from
+declarative scenario specifications, injects controlled faults via
+re-simulation of the physics engine (for physics faults) or post-processing
+(for sensor faults), and emits per-frame labels suitable for downstream
+ML training.
 
-A key finding from the initial ML baseline: point-in-time classification is
-insufficient for relational faults, motivating temporally-aware detection methods
-in later stages.
+An ML baseline showed point-in-time classification is insufficient for
+relational faults, motivating temporally-aware detection methods in later
+stages.
 
 ---
 
@@ -32,8 +39,6 @@ Stage 1 is a five-module pipeline:
 scenario.yaml  →  SignalGenerator  →  CANEncoder  →  FrameScheduler  →  CSV output
 ```
 
-Each module has a single responsibility and communicates through well-defined interfaces:
-
 | Module | File | Responsibility |
 |--------|------|----------------|
 | Config Loader | `src/config_loader.py` | Load and validate YAML configs |
@@ -45,13 +50,14 @@ Each module has a single responsibility and communicates through well-defined in
 
 ### 1.2 Declarative Configuration
 
-Five YAML files define the system:
-
-- **`config/signals.yaml`** — 8 semantic signals with units, ranges, resolutions, and system affiliations
-- **`config/systems.yaml`** — groupings of signals by vehicle subsystem
-- **`config/relationships.yaml`** — cross-signal physics (positive, negative, integral, warmup)
-- **`config/vehicles.yaml`** — vehicle profiles (mass, gearing, drag, CAN mappings)
-- **`config/messages.yaml`** — CAN message definitions (IDs, cycle times, DLC)
+- **`config/signals.yaml`** — 9 semantic signals
+- **`config/systems.yaml`** — signal groupings by subsystem
+- **`config/relationships.yaml`** — cross-signal physics
+- **`config/vehicles.yaml`** — vehicle profiles + CAN mappings + crankshaft params
+- **`config/messages.yaml`** — CAN message definitions
+- **`config/faults/*.yaml`** — one file per fault type
+- **`config/scenarios/*.yaml`** — one file per scenario
+- **`config/evolutions/*.yaml`** — one file per evolution timeline
 
 ### 1.3 Signals
 
@@ -60,6 +66,7 @@ Five YAML files define the system:
 | `engine_rpm` | rpm | [0, 8000] | powertrain |
 | `throttle_position` | percent | [0, 100] | powertrain |
 | `coolant_temperature` | celsius | [−40, 150] | powertrain |
+| `crank_position` | degrees | [0, 360] | powertrain |
 | `brake_pressure` | bar | [0, 200] | braking |
 | `brake_pedal` | percent | [0, 100] | braking |
 | `wheel_speed` | km/h | [0, 250] | braking |
@@ -68,77 +75,92 @@ Five YAML files define the system:
 
 ### 1.4 Physics Model
 
-The signal generator runs in three phases:
+**Phase 1 — Driver inputs.** Converts segments into per-step arrays.
 
-**Phase 1 — Driver inputs.** Converts piecewise scenario segments into per-timestep arrays (throttle, brake, gear).
+**Phase 2 — Longitudinal dynamics + kinematic engine model.**
 
-**Phase 2 — Longitudinal dynamics.** Computes acceleration, speed, and engine RPM using:
-- Force balance: `F_net = F_engine − F_brake − F_drag − F_roll`
-- Euler integration of acceleration to speed
-- Engine RPM from wheel speed × gear ratio × final drive, with sigmoid clutch blend and 150 ms first-order lag filter
+Vehicle dynamics use a force balance:
+```
+F_net = F_engine − F_brake − F_drag − F_roll
+a = F_net / mass
+```
 
-**Phase 3 — Declarative relationships.** Applies relationships (positive/negative/integral/warmup) via multi-pass dependency resolution.
+Engine RPM is derived from wheel speed when the clutch is engaged:
+```
+locked_rpm = wheel_rpm × gear_ratio × final_drive
+```
+Below the engagement threshold (5 km/h), a sigmoid blend transitions to
+a throttle-driven slip RPM. A first-order lag filter (τ = 80 ms) models
+engine rotational inertia. RPM is capped at the redline (6500).
+
+**Torque multiplier effect on RPM:** when `engine_torque_multiplier < 1`
+(torque drop faults), the RPM target is scaled toward idle:
+```
+target_rpm = idle_rpm + (kinematic_target − idle_rpm) × torque_multiplier
+```
+This keeps the RPM bounded — the multiplier can never push RPM above
+its kinematic target. (See Phase B note below.)
+
+**Idle throttle ramp:** idle throttle fades smoothly to zero by 2 km/h,
+avoiding the numerical chatter a hard threshold would cause.
+
+**`crank_position`:** integrated from engine RPM:
+```
+d(crank_position)/dt = RPM × 6 deg/s
+crank_position = (crank_position + RPM × 6 × dt) mod 360
+```
+
+**Phase 3 — Declarative relationships.** Applies cross-signal
+relationships (positive, negative, integral, warmup) via a multi-pass
+dependency resolver.
+
+#### Note on the abandoned torque-balance model
+
+An earlier Phase A version modeled the crankshaft as a state variable
+with inertia `I_crank`, integrated by torque balance. This was
+numerically unstable: the small rotational inertia caused the engine to
+free-rev to redline in <1 second while the vehicle was still at rest. We
+reverted to the kinematic model per an external LLM's recommendation.
+Fields `moment_of_inertia_kg_m2`, `engine_friction_coeff`,
+`clutch_slip_drag_coeff` remain in `vehicles.yaml` for future reference
+but are unused.
 
 ### 1.5 Vehicles
 
-Two vehicle profiles demonstrate the vehicle-agnostic semantic layer:
-
-| Vehicle | Mass (kg) | Gear Ratios | Final Drive | Wheel Radius (m) | Message Class |
-|---------|-----------|-------------|-------------|------------------|---------------|
-| `sedan_a` | 1500 | {1:3.8, 2:2.1, 3:1.4, 4:1.0, 5:0.8} | 3.5 | 0.31 | `sedan_class` |
-| `suv_b` | 2200 | {1:4.2, 2:2.4, 3:1.5, 4:1.0, 5:0.75} | 3.7 | 0.35 | `suv_class` |
+| Vehicle | Mass (kg) | Gear Ratios | Final Drive | Wheel Radius (m) | Redline | Message Class |
+|---------|-----------|-------------|-------------|------------------|---------|---------------|
+| `sedan_a` | 1500 | {1:3.8, 2:2.1, 3:1.4, 4:1.0, 5:0.8} | 3.5 | 0.31 | 6500 | `sedan_class` |
+| `suv_b` | 2200 | {1:4.2, 2:2.4, 3:1.5, 4:1.0, 5:0.75} | 3.7 | 0.35 | 6500 | `suv_class` |
 
 ### 1.6 CAN Message Layout
 
 | Message | sedan_a ID | suv_b ID | Cycle (ms) | Signals |
 |---------|------------|----------|------------|---------|
-| engine_data | 0x100 | 0x200 | 10 | engine_rpm, throttle_position, coolant_temperature |
+| engine_data | 0x100 | 0x200 | 10 | engine_rpm, throttle_position, coolant_temperature, crank_position |
 | brake_data | 0x1A0 | 0x2B0 | 20 | brake_pressure, brake_pedal, wheel_speed |
 | vehicle_dynamics | 0x120 | 0x220 | 50 | vehicle_speed, longitudinal_acceleration |
 
-**Key property:** the same semantic signals map to different CAN IDs across vehicles — a demonstration of the vehicle-agnostic architecture.
-
 ### 1.7 Scenarios
 
-Two baseline scenarios at the end of Stage 1:
-
-**`city_drive.yaml`** — 60 s, sedan_a, three accel/brake cycles, stops at end.
-
-**`highway_cruise.yaml`** — 90 s, suv_b, launch through gears 1–5, sustained cruise, exit deceleration.
+- `city_drive.yaml` — 60 s, sedan_a, clean
+- `highway_cruise.yaml` — 90 s, suv_b, clean
+- `highway_brake_wear_gradual.yaml` — 90 s, suv_b, brake pad wear
+- `highway_cruise_torque_drop.yaml` — 90 s, suv_b, intermittent torque drops
+- `highway_cruise_crank_sensor_freeze.yaml` — 90 s, suv_b, crank sensor freeze
 
 ### 1.8 Output Files
 
-Two files per scenario:
-
-- **`.frames.csv`** — asynchronous raw CAN frames
-  ```
-  timestamp_ms,can_id,payload_hex
-  0,0x100,0c80003c00000000
-  0,0x120,000003e800000000
-  0,0x1A0,0000000000000000
-  ...
-  ```
-
-- **`.signals.csv`** — synchronous decoded signals at 100 Hz
-  ```
-  time_s,timestamp_ms,engine_rpm,throttle_position,...
-  0.0000,0,800.00,0.00,20.00,0.00,0.00,0.00,0.00,0.00
-  ```
-
-Plus a dataset-level **`manifest.csv`** and **`metadata.json`**.
+- **`.frames.csv`** — raw CAN frames
+- **`.signals.csv`** — synchronous decoded signals (100 Hz)
+- **`.faults.csv`** — one row per applied fault (only for fault-bearing scenarios)
+- **`.labels.csv`** — one row per frame (only for fault-bearing scenarios)
+- Plus dataset-level **`manifest.csv`** and **`metadata.json`**
 
 ### 1.9 Validation
 
-Stage 1 was validated through:
-- **91 unit tests** covering every module
-- **External AI validation** of generated signal plots (physically plausible per validation)
-- **Multiple design refactors** driven by external review:
-  1. RPM initially was purely throttle-driven → refactored to wheel-speed-driven with clutch blend
-  2. Vehicle speed was being destroyed by a declarative integral relationship → moved ownership to Phase 2
-  3. RPM gear-shift spikes → smoothed with first-order lag filter
-  4. Clutch-slip boundary discontinuities → smoothed with sigmoid blend
-
-**Key lesson:** the physics engine now produces physically coherent signals across diverse driving scenarios.
+Stage 1 was validated via ~93 tests and external review. Multiple
+refactors: RPM coupling, speed re-integration, gear-shift smoothing,
+clutch blend, acceleration chatter, kinematic engine model.
 
 ---
 
@@ -146,397 +168,314 @@ Stage 1 was validated through:
 
 ### 2.1 Architecture
 
-Stage 2 extends the pipeline with three new modules:
-
 ```
 scenario.yaml (with faults)
     ↓
 SignalGenerator → SignalFaultInjector → CANEncoder → FrameScheduler
-    ↓                                                    ↓
-[fault registry]                              FaultLabelBuilder
-    ↓                                                    ↓
-config/faults/*.yaml                       .faults.csv + .labels.csv
+    ↓                                              ↓
+[fault registry]                          FaultLabelBuilder
+    ↓                                              ↓
+config/faults/*.yaml               .faults.csv + .labels.csv
 ```
 
-### 2.2 Fault Registry
+The injector dispatches by the fault's `injection_point`:
+- `physics` — perturb a physics input and re-run
+- `post_physics` — override signal values after physics has run
 
-Faults are declared one-per-file under `config/faults/`:
+### 2.2 Fault Registry Schema
 
-**`brake_pad_wear.yaml`** (the seed fault):
+Each fault declares:
+- `id`, `physical_category`, `observable_effect`, `layer`
+- `injection_point` (`physics` | `post_physics`, default `physics`)
+- `severity_maps_to` (parameter name that evolution severity maps to)
+- `description`, `parameters`, `targets`, `injection_rule`
 
-```yaml
-fault:
-  id: brake_pad_wear
-  physical_category: mechanical
-  observable_effect: drift
-  layer: signal
-  description: >
-    Reduced braking effectiveness due to loss of friction material on brake pads.
-  parameters:
-    - name: severity_start      # [0.0, 1.0]
-    - name: severity_end        # [0.0, 1.0]
-    - name: progression         # constant | linear | exponential | step
-  targets:
-    signals: [longitudinal_acceleration]
-    messages: []
-  injection_rule: >
-    During the fault window, scale the braking contribution to
-    longitudinal_acceleration by (1 - severity(t)).
+### 2.3 Implemented Fault Types
+
+#### Fault 1 — `brake_pad_wear`
+
+- Physical category: mechanical
+- Observable effect: drift
+- Injection point: physics
+- Target: `longitudinal_acceleration` (cascades to speed, wheel speed, RPM)
+- Parameters: `severity_start`, `severity_end`, `progression`
+
+**Cascade verification (verified in notebook 06):**
+| Signal | Changed? |
+|--------|----------|
+| `longitudinal_acceleration` | ✅ Yes |
+| `vehicle_speed` | ✅ Yes |
+| `wheel_speed` | ✅ Yes |
+| `engine_rpm` | ✅ Yes |
+| `throttle_position` | ❌ No |
+| `brake_pedal` | ❌ No |
+| `brake_pressure` | ❌ No |
+| `coolant_temperature` | ❌ No |
+
+#### Fault 2 — `crankshaft_torque_drop`
+
+- Physical category: mechanical
+- Observable effect: dropout (transient)
+- Injection point: physics
+- Target: `engine_rpm`, `crank_position`
+- Parameters: `drop_magnitude`, `drop_duration_s`, `drop_frequency_hz`,
+  `drop_progression` (step | linear | pulse), `seed`
+- `severity_maps_to`: `drop_magnitude`
+
+**Behavior:** multiple drops per recording spaced by `drop_frequency_hz`.
+Each drop reduces engine torque by `drop_magnitude`. RPM dips
+transiently and recovers via the first-order lag. Verified in notebook 12.
+
+**RPM scaling:** the torque multiplier scales the deviation-from-idle
+of the RPM target. This keeps RPM bounded by construction.
+
+#### Fault 3 — `crank_sensor_failure`
+
+- Physical category: sensor
+- Observable effect: freeze
+- Injection point: post_physics
+- Target: `engine_rpm`, `crank_position`
+- Parameters: `freeze_duration_s`, `freeze_scope` (per_signal | common)
+- `severity_maps_to`: `freeze_duration_s` (normalized against 60 s)
+- Modes supported: **freeze only** (drift/dropout/noise deferred)
+
+**Cross-signal signature** (verified in notebook 12):
+| Signal | Affected? | Reason |
+|--------|-----------|--------|
+| `engine_rpm` | ✅ Frozen | Crank sensor reading |
+| `crank_position` | ✅ Frozen | Same sensor |
+| `vehicle_speed` | ❌ No | Different sensor |
+| `wheel_speed` | ❌ No | Different sensor |
+| `longitudinal_acceleration` | ❌ No | Physics, not sensor |
+| `throttle_position` | ❌ No | Different sensor |
+| `brake_pressure` | ❌ No | Different sensor |
+| `coolant_temperature` | ❌ No | Different sensor |
+
+**Discriminating pattern:** The engine is physically fine, but the
+reported RPM is frozen. A model that correlates RPM with
+`throttle_position` and `longitudinal_acceleration` can detect the
+discrepancy.
+
+### 2.4 Fault Injection Method — Re-Simulation
+
+For `physics`-layer faults:
+1. Compute the fault multiplier array from the resolved faults
+2. Pass to `SignalGenerator.generate(scenario, faults={...})`
+3. Physics engine re-runs with the multipliers
+4. Cascade propagates automatically
+
+For `post_physics`-layer faults:
+1. Physics engine runs cleanly
+2. Post-physics handler overrides the target signal values
+
+Overlap composition: `effective_severity = 1 − Π(1 − severity_i)`
+
+### 2.5 Seed Scenarios
+
+**`highway_brake_wear_gradual.yaml`:**
+| Fault | Window (s) | Severity | Progression |
+|-------|------------|----------|-------------|
+| `wear_1` | 38.0 → 82.0 | 0.0 → 0.4 | linear |
+| `tamper_1` | 85.0 → 90.0 | 0.0 → 0.6 | step |
+
+**`highway_cruise_torque_drop.yaml`:**
+| Fault | Window (s) | Params |
+|-------|------------|--------|
+| `misfire_train` | 28.0 → 65.0 | magnitude 0.7, duration 0.15 s, frequency 0.4 Hz, progression pulse |
+
+**`highway_cruise_crank_sensor_freeze.yaml`:**
+| Fault | Window (s) | Params |
+|-------|------------|--------|
+| `sensor_freeze` | 38.0 → 65.0 | duration 20 s, scope per_signal |
+
+### 2.6 Output Files (Fault-Bearing Scenarios)
+
+**`.faults.csv`** — one row per applied fault:
+```
+fault_id,fault_type,onset_s,end_s,severity,severity_start,severity_end,progression,physical_category,observable_effect,affected_signals
+wear_1,brake_pad_wear,38.0,82.0,0.4,0.0,0.4,linear,mechanical,drift,longitudinal_acceleration
+misfire_train,crankshaft_torque_drop,28.0,65.0,0.7,0.0,0.0,constant,mechanical,dropout,crank_position;engine_rpm
+sensor_freeze,crank_sensor_failure,38.0,65.0,0.333,0.0,0.0,constant,sensor,freeze,crank_position;engine_rpm
 ```
 
-### 2.3 Fault Declaration in Scenarios
+The `severity` column is the normalized strength used by the label
+builder. `severity_start` / `severity_end` are legacy fields used only
+by `brake_pad_wear`.
 
-Scenarios declare faults with relative time anchors:
-
-```yaml
-scenario:
-  name: "Highway Cruise with Brake Wear"
-  duration_s: 90
-  base_rate_hz: 100
-  vehicle_id: suv_b
-  segments:
-    - {name: launch, t_start: 0, t_end: 3, ...}
-    ...
-  faults:
-    - id: wear_1
-      type: brake_pad_wear
-      onset: {anchor: segment_start, segment: cruise, offset_s: 20}
-      end:   {anchor: segment_end,   segment: exit_2, offset_s: 0}
-      params:
-        severity_start: 0.0
-        severity_end: 0.4
-        progression: linear
-
-    - id: tamper_1
-      type: brake_pad_wear
-      onset: {anchor: segment_start, segment: stop, offset_s: 3}
-      end:   {anchor: segment_end,   segment: stop, offset_s: 0}
-      params:
-        severity_start: 0.0
-        severity_end: 0.6
-        progression: step
-```
-
-**Three anchor types:**
-- `scenario_start` — offset from t = 0
-- `segment_start` — offset from a named segment's start
-- `segment_end` — offset from a named segment's end (may be negative)
-
-### 2.4 Injection Method — Re-Simulation
-
-The injector uses a **re-simulation approach**, not direct signal modification:
-
-1. Compute a fault multiplier array from the resolved faults:
-   ```
-   effective_severity(t) = 1 − Π(1 − severity_i(t))
-   brake_force_multiplier(t) = 1 − effective_severity(t)
-   ```
-2. Pass this to `SignalGenerator.generate(scenario, faults={"brake_force_multiplier": ...})`
-3. The physics engine uses it in `_compute_dynamics`: `f_brake *= brake_force_multiplier[i]`
-4. Full cascade propagates automatically:
-   - `longitudinal_acceleration` → `vehicle_speed` → `wheel_speed` → `engine_rpm`
-
-**Why re-simulation:** ensures physical consistency across every dependent signal. No cascade enumeration needed. Adding a new fault family means adding a new physics input parameter, not new cascade logic.
-
-### 2.5 The Seed Scenario
-
-**`highway_brake_wear_gradual.yaml`** — 90 s, suv_b, two faults:
-
-| Fault ID | Type | Onset (s) | End (s) | Severity | Progression |
-|----------|------|-----------|---------|----------|-------------|
-| `wear_1` | brake_pad_wear | 38.0 | 82.0 | 0.0 → 0.4 | linear |
-| `tamper_1` | brake_pad_wear | 85.0 | 90.0 | 0.0 → 0.6 | step |
-
-**Total fault-active time:** 44 + 5 = 49 seconds out of 90 → **54.44%** of the recording.
-
-**No overlap** between windows — the two faults affect disjoint time intervals.
-
-### 2.6 Output Files (Extended)
-
-In addition to `.frames.csv` and `.signals.csv`, fault-bearing scenarios produce:
-
-**`.faults.csv`** — per-event summary:
-```
-fault_id,fault_type,onset_s,end_s,severity_start,severity_end,progression,physical_category,observable_effect,affected_signals
-wear_1,brake_pad_wear,38.0,82.0,0.0,0.4,linear,mechanical,drift,longitudinal_acceleration
-tamper_1,brake_pad_wear,85.0,90.0,0.0,0.6,step,mechanical,drift,longitudinal_acceleration
-```
-
-**`.labels.csv`** — per-frame labels aligned with `.frames.csv`:
+**`.labels.csv`** — one row per frame, aligned with `.frames.csv`:
 ```
 timestamp_ms,can_id,is_fault,fault_count,severity_max,fault_ids,fault_types,physical_categories,observable_effects
-0,0x200,0,0,0.0,,,,
-...
-85000,0x200,1,1,0.6,tamper_1,brake_pad_wear,mechanical,drift
 ```
 
-**Row alignment:** `labels.csv` has the same number of rows as `frames.csv`, with matching `(timestamp_ms, can_id)` columns. Trivially joinable for ML training.
+Row-aligned with `frames.csv` by `(timestamp_ms, can_id)`.
 
-### 2.7 Label Statistics for the Seed Scenario
+### 2.7 Label Statistics
 
-| Metric | Value |
-|--------|-------|
-| Total frames | 15,300 |
-| Faulty frames | 8,330 (54.44%) |
-| Clean frames | 6,970 (45.56%) |
-| Frames with `wear_1` | 7,480 |
-| Frames with `tamper_1` | 850 |
-| Frames with ≥2 faults | 0 |
-| Engine (0x200) faulty fraction | 4,900 / 9,000 (54.44%) |
-| Dynamics (0x220) faulty fraction | 980 / 1,800 (54.44%) |
-| Brake (0x2B0) faulty fraction | 2,450 / 4,500 (54.44%) |
+| Scenario | Faulty frames | Total | % |
+|----------|--------------|-------|---|
+| highway_brake_wear_gradual | 8,330 | 15,300 | 54.44% |
+| highway_cruise_torque_drop | 6,290 | 15,300 | 41.11% |
+| highway_cruise_crank_sensor_freeze | 4,590 | 15,300 | 30.00% |
 
-**Uniform fault fraction across CAN IDs** confirms the fault is time-based, not per-message.
+### 2.8 Evolution Timelines
 
-### 2.8 Cascade Verification
+The `EvolutionBuilder` composes N recordings of the same base scenario at
+different simulated days, each with a different fault severity.
 
-The injector's effect was verified to propagate exactly through the four expected signals:
+Three evolutions implemented:
+- `brake_wear_95days.yaml` — 7 recordings
+- `torque_drops_90days.yaml` — 6 recordings
+- `crank_sensor_freeze_90days.yaml` — 6 recordings
 
-| Signal | Changed by fault? |
-|--------|-------------------|
-| `longitudinal_acceleration` | ✅ Yes (direct target) |
-| `vehicle_speed` | ✅ Yes (integrated from accel) |
-| `wheel_speed` | ✅ Yes (tracks vehicle_speed) |
-| `engine_rpm` | ✅ Yes (derived from wheel_speed via drivetrain) |
-| `throttle_position` | ❌ No (driver input) |
-| `brake_pedal` | ❌ No (driver input) |
-| `brake_pressure` | ❌ No (hydraulic, unaffected by pad wear) |
-| `coolant_temperature` | ❌ No (thermal, too slow to matter here) |
+Each evolution produces:
+- Per-recording `.frames.csv`, `.signals.csv`, `.faults.csv`, `.labels.csv`
+- Evolution-level `evolution.yaml` (source copy), `timeline.csv`, `metadata.json`
 
-**No extraneous changes.** The cascade is exactly as physically expected.
+### 2.9 Fault Injection Dispatch
+
+The injector reads `injection_point` from the fault registry for each
+resolved fault and routes it to:
+- The physics path (via `_compose_multiplier` and `_compute_torque_drop_multiplier`)
+- The post-physics path (via `_apply_post_physics_fault`)
 
 ---
 
 ## Part 3 — ML Baseline (Validation Slice)
 
-### 3.1 Purpose
+A deliberately naive point-in-time classifier was trained on `brake_pad_wear`.
 
-A **deliberately naive** point-in-time classifier was trained to answer one question:
-*"Is the generated data learnable by a standard ML model?"*
-
-**Setup:**
-- Features: 8 signal values at each timestep
-- Label: `is_fault` at that frame
-- Model: Random Forest (200 trees, max_depth=12, class_weight="balanced")
-- Split: time-based (first 60% train, last 40% test)
-- Primary metric: AUC-PR
-
-### 3.2 Results — Imbalanced Test Set
-
+**Results — imbalanced test set (91.67% faulty):**
 | Metric | Value |
 |--------|-------|
 | AUC-PR | 0.9507 |
 | AUC-ROC | 0.6656 |
-| Test set class balance | 91.67% faulty |
-| Random classifier AUC-PR | 0.9167 |
-| Improvement over random | **1.04×** |
+| Random baseline | 0.9167 |
+| Improvement factor | 1.04× |
 
-**Confusion matrix (threshold=0.5):**
-
-```
-           Predicted clean   Predicted fault
-Actual clean       0              300          ← 100% of clean frames misclassified
-Actual fault     441            2,859
-```
-
-**Classification report:**
-
-| Class | Precision | Recall | F1 | Support |
-|-------|-----------|--------|-----|---------|
-| clean | 0.0000 | 0.0000 | 0.0000 | 300 |
-| fault | 0.9050 | 0.8664 | 0.8853 | 3300 |
-
-**The model never correctly classified a clean frame.** Its apparent high AUC-PR is an artifact of the imbalanced test set.
-
-### 3.3 Results — Balanced Test Set
-
-To remove the class imbalance, the majority class was subsampled to match the minority:
-
+**Results — balanced test set:**
 | Metric | Value |
 |--------|-------|
-| Balanced test set size | 600 (300 clean + 300 fault) |
 | AUC-PR | 0.7181 |
 | AUC-ROC | 0.6783 |
 
-**Confusion matrix:**
+**The model never correctly classified a clean frame.** The high
+imbalanced AUC-PR was an artifact of class imbalance.
 
-```
-           Predicted clean   Predicted fault
-Actual clean       0              300          ← still 0% on clean frames
-Actual fault      31              269
-```
+**Key finding:** the fault is relational and temporal. A point-in-time
+classifier cannot detect the broken relationship between
+`brake_pressure` and `longitudinal_acceleration`.
 
-**AUC-ROC 0.68** — barely above random. **AUC-PR 0.72** — only slightly above the balanced baseline of 0.5.
-
-### 3.4 Feature Importances
-
-| Feature | Importance |
-|---------|-----------|
-| wheel_speed | 0.2474 |
-| longitudinal_acceleration | 0.2414 |
-| **coolant_temperature** | **0.2362** ← suspicious |
-| vehicle_speed | 0.1896 |
-| engine_rpm | 0.0481 |
-| throttle_position | 0.0374 |
-| brake_pedal | 0.0000 |
-| brake_pressure | 0.0000 |
-
-**Red flags:**
-
-- `coolant_temperature` has high importance (0.236) despite being unaffected by the fault. Coolant warms monotonically over time — the model used it as a **temporal proxy**, not as fault information.
-- `engine_rpm` has very low importance (0.048) despite being a cascade signal. The model didn't need it.
-- `brake_pressure` has **zero** importance. Correct in one sense (the fault doesn't affect it), but concerning — the model never learned to compare pressure to deceleration.
-
-### 3.5 Interpretation
-
-**The point-in-time classifier did not learn the fault.** It learned to correlate certain signal values with the fault's typical time window. Because the fault occupies 54% of the recording and coincides with a specific driving phase, the model was able to achieve high accuracy on the imbalanced test set by exploiting class imbalance and temporal proxies.
-
-**Key finding:** the fault is **relational and temporal** — its signature is the *broken relationship* between `brake_pressure` and `longitudinal_acceleration` over a window of time. A point-in-time classifier cannot detect it because it cannot see the relationship.
-
-### 3.6 Implications
-
-1. **The synthetic pipeline produces learnable data** — but the labels are only learnable with the right model class.
-2. **The naive baseline fails** — and its failure is *informative*. It motivates temporally-aware detection methods.
-3. **Temporal models are required** — either:
-   - Window-based (sliding window of signals as input)
-   - Residual-based (compare expected vs. observed relationships)
-   - Change-point detection (detect when relationships shift)
-
-These belong in **Stage 4** (proper ML evaluation).
+**Implication:** temporally-aware detection (window-based, residual-based,
+change-point detection) is required. This is a Stage 4 concern.
 
 ---
 
-## Part 4 — Test Suite Summary
+## Part 4 — Test Suite
 
 | Module | Tests |
 |--------|-------|
-| Config loader | 17 |
-| Signal generator | 14 |
-| CAN encoder | 18 |
-| Frame scheduler | 18 |
-| Pipeline | 13 |
-| Dataset builder | 11 |
-| Fault registry | 19 |
-| Scenario faults | 28 |
-| Fault injector | 22 |
-| Fault labels | 18 |
-| **Total** | **~178** |
+| Config loader | ~21 |
+| Signal generator | ~26 |
+| CAN encoder | ~19 |
+| Frame scheduler | ~19 |
+| Pipeline | ~13 |
+| Dataset builder | ~11 |
+| Fault registry | ~19 |
+| Scenario faults | ~28 |
+| Fault injector | ~22 |
+| Fault labels | ~20 |
+| Evolution builder | ~22 |
+| **Total** | **~240** |
 
-All tests pass. The test suite covers positive paths, negative paths, boundary conditions, and physical invariants.
+All tests pass.
 
 ---
 
 ## Part 5 — Key Design Decisions
 
-### 5.1 Message sets per vehicle class
-
-Messages are organized into *message sets* (one per vehicle class). Vehicles reference a set via `message_set` field. Same semantic structure, different CAN IDs per class. Preserves vehicle-agnosticism.
-
-### 5.2 Signal ownership — Phase 2 vs. Phase 3
-
-- **Phase 2 (dynamics)** owns: `longitudinal_acceleration`, `vehicle_speed`, `engine_rpm` (iterative physics)
-- **Phase 3 (relationships)** owns: `brake_pressure`, `wheel_speed`, `coolant_temperature` (algebraic transforms)
-
-This separation emerged from a bug where a declarative `integral` relationship destroyed the correctly-integrated speed.
-
-### 5.3 Re-simulation fault injection
-
-Faults are applied by perturbing **physics inputs**, not by modifying signals directly. The injector computes a multiplier array and re-runs the physics engine. Cascade propagation is automatic.
-
-### 5.4 Relative time anchors
-
-Fault onset/end times are declared relative to segments, not absolute. This makes scenarios composable, robust to length changes, and semantically meaningful.
-
-### 5.5 Overlap composition
-
-Overlapping faults on the same signal compose via `1 − Π(1 − sᵢ)` — sub-additive, less than the sum, more than either alone. Matches independent failure mode composition.
-
-### 5.6 Deterministic output
-
-Every stage is a pure function. Same inputs → same outputs. No randomness, no hidden state. Integer timestamps in milliseconds.
+- **Message sets per vehicle class** — same semantic structure, different CAN IDs
+- **Signal ownership** — Phase 2 owns dynamics + crank_position; Phase 3 owns relationships
+- **Re-simulation fault injection** for physics faults
+- **Post-physics signal override** for sensor faults
+- **Relative time anchors** for fault declarations
+- **Overlap composition** via `1 − Π(1 − sᵢ)`
+- **Deterministic output** — no randomness except fault drop seeds
+- **Kinematic engine model** — stable, physically defensible
+- **Smooth idle ramp** — avoids low-speed chatter
 
 ---
 
 ## Part 6 — External Validation
 
-The project has been reviewed by external LLMs at multiple points:
-
-1. **Signal plausibility** (Stage 1) — validated as physically plausible after two rounds of refinement
-2. **Fault timing** (Stage 2.1b) — validated as correctly applied, with the "silent fault" case correctly interpreted
-3. **Scenario design** (Stage 2.1b) — recommended moving `tamper_1` earlier so both faults have visible effects (accepted)
-
-**Key lesson:** external review caught real issues that internal testing missed (e.g., RPM coupling, speed re-integration bug, scenario timing).
+Reviews by external LLMs at multiple points:
+1. Signal plausibility (Stage 1)
+2. Fault timing (Stage 2.1b)
+3. Scenario design (Stage 2.1b)
+4. Crankshaft physics (Phase A) — recommended kinematic model
+5. Acceleration chatter (Phase A)
+6. Crank position aliasing (visualization issue)
+7. Phase B crank faults (final review — "physically correct and highly distinguishable")
 
 ---
 
 ## Part 7 — Known Limitations
 
-### 7.1 Data limitations
+**Data limitations:**
+- 5 scenarios, 3 evolution timelines, 3 fault types
+- Class imbalance in labels (30–54% faulty frames; real faults <1%)
+- No noise in synthetic signals
+- No real vehicle validation yet
 
-- **Small dataset.** One vehicle pair, two scenarios, one fault type (with two parameterizations).
-- **Class imbalance.** The seed scenario has 54% faulty frames — much higher than real-world fault prevalence (<1%).
-- **No noise.** The synthetic signals are clean; real CAN data has quantization noise, timing jitter, and frame drops.
-- **No real vehicle validation yet.** All results are on synthetic data only.
+**Model limitations:**
+- Linear torque model (no torque curve)
+- No gear-shift torque interruption
+- No brake fade or tire slip
+- Static thermal model
+- Kinematic engine model (no dynamic crankshaft transients)
+- Crank sensor failure supports only `freeze` mode (drift/dropout/noise deferred)
 
-### 7.2 Model limitations
-
-- **No torque curve.** Engine torque is linear in throttle; real engines have RPM-dependent torque curves.
-- **No gear-shift torque interruption.** Shift dynamics are instantaneous.
-- **No brake fade or tire slip.** Wheels maintain 100% traction at all times.
-- **Static thermal model.** Coolant warm-up is time-based, not load-dependent.
-- **Limited fault library.** Only `brake_pad_wear` is implemented; eight other fault types are catalogued but not built.
-
-### 7.3 ML validation limitation
-
-- **Point-in-time classifier is inadequate.** The baseline proves this empirically.
-- **Temporal detection untested.** Window-based or residual-based models would need to be built to prove the data is learnable.
-- **Cross-vehicle generalization untested.** No model has been evaluated across vehicle classes.
+**ML validation limitation:**
+- Point-in-time classifier inadequate (proven empirically)
+- Temporal detection untested
+- Cross-vehicle generalization untested
 
 ---
 
 ## Part 8 — Planned Next Steps
 
-### Immediate options
+**Batch 2 — Remaining engine-side faults:**
+- `throttle_sensor_gain_fault`
+- `engine_misfire` (or is `crankshaft_torque_drop` sufficient?)
+- `coolant_sensor_drift`
 
-**Option A — Return to Stage 2.3:** expand the fault library
-- Add `wheel_speed_sensor_dropout`, `brake_pressure_sensor_drift`, `can_bus_frame_drop`, etc.
-- Each new fault type demonstrates the extensibility of the framework
-- Estimated effort: 2–3 sessions
+**Batch 3 — Vehicle dynamics faults:**
+- `rolling_resistance_increase`
+- `aerodynamic_drag_increase`
 
-**Option B — Build temporal ML slice:** validate that windowed/residual models work
-- Engineer residual features and train RF on them
-- Build windowed classifier (LSTM/1D-CNN)
-- Prove the data is learnable under temporally-aware methods
-- Estimated effort: 1–2 sessions
+**Frame-layer faults:**
+- `can_bus_frame_drop`
+- `can_bus_frame_duplicate`
+- `can_bus_jitter`
 
-**Option C — Move to Stage 3:** LLM scenario planner
-- Turn natural language into scenario YAML
-- Requires a stable scenario schema (achieved)
-- Estimated effort: several sessions
+**Signal expansion:**
+- `mass_air_flow`, `steering_angle`, `battery_voltage`, etc.
 
-### Longer-term plan
-
-- **Stage 3** — LLM-driven scenario generation
-- **Stage 4** — Full ML pipeline with detection, localization, diagnosis, severity regression, and cross-vehicle generalization
-- **Stage 5** — Real vehicle validation using a reference dataset
+**Longer-term:**
+- Stage 3 (LLM scenario planner)
+- Stage 4 (full ML pipeline)
+- Stage 5 (real vehicle validation)
 
 ---
 
 ## Part 9 — Paper Contributions (Emerging)
 
-Based on the work completed so far, the paper can claim the following contributions:
-
-1. **A declarative, vehicle-agnostic synthetic CAN data generation framework** with physically-grounded signal generation, config-driven behavior, and cross-vehicle generalization.
-
-2. **A re-simulation-based fault injection architecture** that automatically propagates fault effects through the physics cascade without per-fault cascade enumeration.
-
-3. **A two-layer fault taxonomy** (physical category + observable effect) with declarative fault definitions and relative time anchors.
-
-4. **A reproducible labeling pipeline** that produces per-frame labels aligned with raw CAN frames, suitable for ML training.
-
-5. **An empirical finding** that point-in-time classifiers fail to detect relational faults, motivating temporally-aware detection methods.
-
-6. **Open-source release** of configs, code, scenarios, and generated datasets.
+1. A declarative, vehicle-agnostic synthetic CAN data generation framework
+2. A hybrid fault injection architecture (re-simulation for physics, override for sensor)
+3. A two-layer fault taxonomy (physical category + observable effect)
+4. A reproducible labeling pipeline for ML training
+5. An empirical finding that point-in-time classifiers fail on relational faults
+6. A kinematic engine model that is physically defensible and numerically stable
+7. Open-source release of configs, code, scenarios, and generated datasets
 
 ---
 
@@ -551,11 +490,19 @@ scenario_generator/
 │   ├── vehicles.yaml
 │   ├── messages.yaml
 │   ├── faults/
-│   │   └── brake_pad_wear.yaml
-│   └── scenarios/
-│       ├── city_drive.yaml
-│       ├── highway_cruise.yaml
-│       └── highway_brake_wear_gradual.yaml
+│   │   ├── brake_pad_wear.yaml
+│   │   ├── crankshaft_torque_drop.yaml
+│   │   └── crank_sensor_failure.yaml
+│   ├── scenarios/
+│   │   ├── city_drive.yaml
+│   │   ├── highway_cruise.yaml
+│   │   ├── highway_brake_wear_gradual.yaml
+│   │   ├── highway_cruise_torque_drop.yaml
+│   │   └── highway_cruise_crank_sensor_freeze.yaml
+│   └── evolutions/
+│       ├── brake_wear_95days.yaml
+│       ├── torque_drops_90days.yaml
+│       └── crank_sensor_freeze_90days.yaml
 ├── src/
 │   ├── config_loader.py
 │   ├── signal_generator.py
@@ -564,7 +511,8 @@ scenario_generator/
 │   ├── pipeline.py
 │   ├── dataset_builder.py
 │   ├── fault_injector.py
-│   └── fault_labels.py
+│   ├── fault_labels.py
+│   └── evolution_builder.py
 ├── tests/
 │   ├── test_config_loader.py
 │   ├── test_signal_generator.py
@@ -575,72 +523,40 @@ scenario_generator/
 │   ├── test_fault_registry.py
 │   ├── test_scenario_faults.py
 │   ├── test_fault_injector.py
-│   └── test_fault_labels.py
+│   ├── test_fault_labels.py
+│   └── test_evolution_builder.py
 ├── notebooks/
-│   ├── 01_signal_generator_validation.ipynb
-│   ├── 02_can_encoder_validation.ipynb
-│   ├── 03_frame_scheduler_validation.ipynb
-│   ├── 04_pipeline_validation.ipynb
-│   ├── 05_dataset_validation.ipynb
-│   ├── 06_fault_injector.ipynb
-│   ├── 07_fault_labels.ipynb
-│   └── 08_ml_baseline.ipynb
-├── data/
+│   ├── 01–11 (existing validation notebooks)
+│   └── 12_crank_faults.ipynb
+├── scripts/
+│   └── build_all_data.py
+├── data/                          ← gitignored
 │   ├── manifest.csv
 │   ├── metadata.json
 │   ├── sedan_a/
-│   │   ├── city_drive.frames.csv
-│   │   └── city_drive.signals.csv
-│   └── suv_b/
-│       ├── highway_cruise.frames.csv
-│       ├── highway_cruise.signals.csv
-│       ├── highway_cruise_with_brake_wear.frames.csv
-│       ├── highway_cruise_with_brake_wear.signals.csv
-│       ├── highway_cruise_with_brake_wear.faults.csv
-│       └── highway_cruise_with_brake_wear.labels.csv
-└── docs/
-    ├── fault_catalog.html
-    ├── verification_log.md
-    └── project_status.md   ← this document
+│   ├── suv_b/
+│   └── ...
+├── docs/
+│   ├── fault_catalog.html
+│   ├── verification_log.md
+│   └── project_status.md          ← this document
+└── .gitignore
 ```
 
 ---
 
 ## Appendix B — Reproducibility
 
-To reproduce the current state:
-
 ```bash
-# Install dependencies
 pip install -r requirements.txt
 pip install -e .
 
-# Validate all configs
 python -m src.config_loader config/
-
-# Run the full test suite
 pytest tests/ -v
-
-# Generate the dataset
-python -c "
-from src.dataset_builder import DatasetBuilder
-b = DatasetBuilder('config')
-b.build(
-    scenario_paths=[
-        'config/scenarios/city_drive.yaml',
-        'config/scenarios/highway_cruise.yaml',
-        'config/scenarios/highway_brake_wear_gradual.yaml',
-    ],
-    output_dir='data',
-)
-"
-
-# Run the notebooks in order (01 through 08)
+python -m scripts.build_all_data
 jupyter notebook notebooks/
 ```
 
 ---
 
 *End of document.*
-
-
